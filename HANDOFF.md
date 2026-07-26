@@ -21,7 +21,7 @@
 - 已完成统一 `SummaryProvider` 契约和两套独立后端；Kimi 私有 API 仍隔离在 `src/integrations/kimi/`。
 - 已完成普通网页、Bilibili、YouTube、PDF.js 提取器、任务 reducer、设置迁移、动态 host permission 与基本单元测试。Bilibili/YouTube 当前采用“字幕优先、无字幕保守降级”，完整站点适配与无字幕转写列为后续优化，不把整页 DOM 当作可靠正文。
 - 当前未完成项主要是脱敏 Kimi fixture 的扩充、fake browser 集成测试、真实 Chrome profile 手工验收和发布前安全扫描，见 [docs/DEVELOPMENT.md](<docs/DEVELOPMENT.md>)。
-- 原始行为基线位于 `/Users/lynn/Workspace/kimi-copilot-patched`。
+- 原始行为基线位于本工作区之外的 `kimi-copilot-patched` 目录。
 - 原扩展版本为 `1.13.0`，Manifest V3。
 - 原项目只有格式化后的打包产物，没有可恢复的 TypeScript 源码。
 - Kimi 接口属于网页私有 API，是项目中最大的不确定性，必须隔离在适配层并通过契约样本验证。
@@ -700,11 +700,11 @@ UI 根据错误类型决定：
 
 本地基线：
 
-- `/Users/lynn/Workspace/kimi-copilot-patched/manifest.json`
-- `/Users/lynn/Workspace/kimi-copilot-patched/docs/CODE_MAP.md`
-- `/Users/lynn/Workspace/kimi-copilot-patched/docs/VARIABLE_MAPPING.md`
-- `/Users/lynn/Workspace/kimi-copilot-patched/CLAUDE.md`
-- `/Users/lynn/Workspace/kimi-copilot-patched/TABLE_FIX_README.md`
+- `kimi-copilot-patched/manifest.json`
+- `kimi-copilot-patched/docs/CODE_MAP.md`
+- `kimi-copilot-patched/docs/VARIABLE_MAPPING.md`
+- `kimi-copilot-patched/CLAUDE.md`
+- `kimi-copilot-patched/TABLE_FIX_README.md`
 
 官方资料：
 
