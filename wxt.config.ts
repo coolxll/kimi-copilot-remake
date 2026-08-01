@@ -6,9 +6,16 @@ export default defineConfig({
     name: "Kimi Copilot Remake",
     description: "使用 Kimi 或 OpenAI 兼容 API 总结网页内容",
     version: "0.1.0",
-    minimum_chrome_version: "116",
+    minimum_chrome_version: "140",
     permissions: ["activeTab", "scripting", "sidePanel", "storage", "notifications"],
-    host_permissions: ["https://*.kimi.com/*", "https://*.volces.com/*"],
+    host_permissions: [
+      "https://*.kimi.com/*",
+      "https://*.volces.com/*",
+      // Bilibili metadata/player APIs and the signed subtitle CDN. No cookies
+      // permission is needed: the background fetch uses the browser session.
+      "https://api.bilibili.com/*",
+      "https://*.hdslb.com/*",
+    ],
     optional_host_permissions: [
       "https://*/*",
       "http://localhost/*",

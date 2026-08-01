@@ -1,6 +1,23 @@
 import { browser } from "wxt/browser";
+import {
+  fetchBilibiliSubtitleInBackground,
+  isBilibiliSubtitleMessage,
+} from "../src/platform/chrome/bilibili";
 
 export default defineBackground(() => {
+  browser.runtime.onMessage.addListener((message, _sender, sendResponse) => {
+    if (!isBilibiliSubtitleMessage(message)) return undefined;
+    void fetchBilibiliSubtitleInBackground(message.request)
+      .then(sendResponse)
+      .catch(() => sendResponse({
+        subtitles: "",
+        pageCount: 0,
+        loginState: "unknown" as const,
+        unavailableReason: "扩展后台请求 B 站字幕失败",
+      }));
+    return true;
+  });
+
   // WXT emits a global default_path for the side panel entrypoint. Disable that
   // global panel at runtime so the panel is only enabled for the tab that the
   // user explicitly opened it from.

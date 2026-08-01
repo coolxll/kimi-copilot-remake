@@ -62,6 +62,7 @@ Kimi 适配层集中处理：refresh token、single-flight 刷新、一次 401 �
 - Kimi Token：兼容旧 key `local:kimi_tokens`。
 - API Root 保存前校验协议并通过用户手势请求 `${origin}/*` 可选权限；修改 Root 后撤销旧 origin。
 - content script 不接触 Token；兼容请求从 sidepanel extension page 发起。
+- Bilibili 元数据与字幕请求由 background service worker 发起，固定声明 `api.bilibili.com` 和 `*.hdslb.com` host permissions，使用 `credentials: "include"` 获取站点会话能力；扩展不申请 `cookies` 权限、不读取或持久化 SESSDATA。已签名字幕资源使用 `credentials: "omit"`。
 
 ## 失败分类
 

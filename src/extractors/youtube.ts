@@ -47,7 +47,14 @@ export class YoutubeExtractor implements ContentExtractor {
         transcriptResult = await browser.scripting.executeScript({
           target: { tabId: context.tabId },
           world: "MAIN",
-          func: async (url: string) => fetch(url).then((response) => response.text()),
+          func: async (url: string) => {
+            const target = new URL(url, location.href);
+            // Same-origin timedtext requests can use the current YouTube page
+            // session; signed cross-origin caption URLs must not receive
+            // credentials because they commonly allow wildcard CORS.
+            const credentials = target.origin === location.origin ? "include" : "omit";
+            return fetch(target.href, { credentials }).then((response) => response.text());
+          },
           args: [track.baseUrl],
         });
       } catch (error) {

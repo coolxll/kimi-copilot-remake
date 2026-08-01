@@ -1,10 +1,17 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   chooseBilibiliSubtitleTrack,
+  formatBilibiliCommentSection,
   isLikelyMismatchedBilibiliSubtitle,
   parseBilibiliVideoUrl,
   selectBilibiliPage,
 } from "../../src/extractors/bilibili";
+import { fetchBilibiliSubtitleInBackground } from "../../src/platform/chrome/bilibili";
+
+afterEach(() => {
+  vi.unstubAllGlobals();
+  vi.restoreAllMocks();
+});
 
 describe("Bilibili URL and page selection", () => {
   it("preserves the BV id and optional page number", () => {
@@ -66,5 +73,100 @@ describe("Bilibili subtitle track selection", () => {
     expect(isLikelyMismatchedBilibiliSubtitle(1283, 756.64)).toBe(true);
     expect(isLikelyMismatchedBilibiliSubtitle(1283, 1180)).toBe(false);
     expect(isLikelyMismatchedBilibiliSubtitle(180, 120)).toBe(false);
+  });
+});
+
+describe("Bilibili background subtitle fetch", () => {
+  it("uses the WBI API with the page-selected P and omits credentials for signed subtitle URLs", async () => {
+    const calls: Array<{ url: string; credentials?: RequestCredentials }> = [];
+    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      calls.push({ url, credentials: init?.credentials });
+      if (url.includes("/x/web-interface/view")) {
+        return new Response(JSON.stringify({
+          code: 0,
+          data: {
+            bvid: "BV1Test",
+            aid: 123,
+            title: "测试视频",
+            desc: "视频简介",
+            duration: 10,
+            pages: [
+              { page: 1, cid: 101, part: "第一 P", duration: 280 },
+              { page: 2, cid: 202, part: "第二 P", duration: 10 },
+            ],
+          },
+        }), { status: 200 });
+      }
+      if (url.includes("/x/player/wbi/v2")) {
+        return new Response(JSON.stringify({
+          code: 0,
+          data: {
+            bvid: "BV1Test",
+            aid: 123,
+            cid: 202,
+            subtitle: { subtitles: [
+              { lan: "ai-zh", ai_type: 1, subtitle_url: "//aisubtitle.hdslb.com/test.json" },
+            ] },
+          },
+        }), { status: 200 });
+      }
+      if (url.includes("aisubtitle.hdslb.com")) {
+        return new Response(JSON.stringify({ body: [
+          { from: 0, to: 5, content: "第一句" },
+          { from: 5, to: 10, content: "第二句" },
+        ] }), { status: 200 });
+      }
+      throw new Error(`unexpected URL: ${url}`);
+    }));
+
+    const result = await fetchBilibiliSubtitleInBackground({
+      videoRef: { bvid: "BV1Test", pageNumber: 2 },
+      currentCid: 101,
+    });
+
+    expect(result).toMatchObject({
+      title: "测试视频",
+      selectedPage: 2,
+      subtitles: "第一句\n第二句",
+      subtitleIsAi: true,
+    });
+    expect(calls.filter((call) => call.url.includes("api.bilibili.com")).every((call) => call.credentials === "include")).toBe(true);
+    expect(calls.find((call) => call.url.includes("aisubtitle.hdslb.com"))?.credentials).toBe("omit");
+    expect(calls.some((call) => call.url.includes("cid=202"))).toBe(true);
+  });
+
+  it("probes the Bilibili login state when no subtitle track is downloadable", async () => {
+    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.includes("/x/web-interface/view")) {
+        return new Response(JSON.stringify({
+          code: 0,
+          data: { bvid: "BV1Test", aid: 123, cid: 101, pages: [{ page: 1, cid: 101 }] },
+        }), { status: 200 });
+      }
+      if (url.includes("/x/player/")) {
+        return new Response(JSON.stringify({ code: 0, data: { bvid: "BV1Test", aid: 123, cid: 101, subtitle: { subtitles: [] } } }), { status: 200 });
+      }
+      if (url.includes("/x/web-interface/nav")) {
+        return new Response(JSON.stringify({ code: 0, data: { isLogin: false } }), { status: 200 });
+      }
+      throw new Error(`unexpected URL: ${url}`);
+    }));
+
+    const result = await fetchBilibiliSubtitleInBackground({ videoRef: { bvid: "BV1Test" } });
+
+    expect(result.subtitles).toBe("");
+    expect(result.loginState).toBe("logged-out");
+    expect(result.unavailableReason).toBe("B 站没有返回可下载字幕轨");
+  });
+});
+
+describe("Bilibili comment fallback", () => {
+  it("labels comments as a limited non-transcript section", () => {
+    expect(formatBilibiliCommentSection(["评论一", "评论二"])).toBe(
+      "## 评论区摘录（仅部分评论，不代表视频正文）\n\n1. 评论一\n2. 评论二",
+    );
+    expect(formatBilibiliCommentSection([])).toBe("");
   });
 });
