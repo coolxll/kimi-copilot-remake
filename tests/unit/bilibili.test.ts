@@ -190,6 +190,54 @@ describe("Bilibili background subtitle fetch", () => {
     expect(result.subtitles).toBe("");
     expect(result.unavailableReason).toBe("Bilibili 字幕接口返回了不匹配的视频");
   });
+
+  it("rejects view metadata when it does not prove the requested video", async () => {
+    const calls: string[] = [];
+    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      calls.push(url);
+      if (url.includes("/x/web-interface/view")) {
+        return new Response(JSON.stringify({
+          code: 0,
+          data: { aid: 456, cid: 101, pages: [{ page: 1, cid: 101 }] },
+        }), { status: 200 });
+      }
+      if (url.includes("/x/web-interface/nav")) {
+        return new Response(JSON.stringify({ code: 0, data: { isLogin: true } }), { status: 200 });
+      }
+      throw new Error(`unexpected URL: ${url}`);
+    }));
+
+    const result = await fetchBilibiliSubtitleInBackground({ videoRef: { bvid: "BV1Test" } });
+
+    expect(result.subtitles).toBe("");
+    expect(result.unavailableReason).toBe("Bilibili 视频身份校验失败，已拒绝使用字幕");
+    expect(calls.some((url) => url.includes("/x/player/"))).toBe(false);
+  });
+
+  it("does not use the default cid when an explicit P cannot be resolved", async () => {
+    const calls: string[] = [];
+    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      calls.push(url);
+      if (url.includes("/x/web-interface/view")) {
+        return new Response(JSON.stringify({
+          code: 0,
+          data: { bvid: "BV1Test", aid: 123, cid: 101, pages: [] },
+        }), { status: 200 });
+      }
+      if (url.includes("/x/web-interface/nav")) {
+        return new Response(JSON.stringify({ code: 0, data: { isLogin: true } }), { status: 200 });
+      }
+      throw new Error(`unexpected URL: ${url}`);
+    }));
+
+    const result = await fetchBilibiliSubtitleInBackground({ videoRef: { bvid: "BV1Test", pageNumber: 2 } });
+
+    expect(result.subtitles).toBe("");
+    expect(result.unavailableReason).toBe("无法确认 Bilibili 当前分 P，已拒绝使用不确定的字幕轨");
+    expect(calls.some((url) => url.includes("/x/player/"))).toBe(false);
+  });
 });
 
 describe("Bilibili comment fallback", () => {

@@ -112,8 +112,11 @@ export async function fetchBilibiliSubtitleInBackground(
   }
 
   const viewData = view.data;
-  if (videoRef.bvid && viewData.bvid && viewData.bvid.toUpperCase() !== videoRef.bvid.toUpperCase()) {
-    return unavailable("Bilibili 视频 ID 与页面地址不一致");
+  if (
+    (videoRef.bvid && (!viewData.bvid || viewData.bvid.toUpperCase() !== videoRef.bvid.toUpperCase()))
+    || (videoRef.aid && (viewData.aid === undefined || String(viewData.aid) !== String(videoRef.aid)))
+  ) {
+    return unavailable("Bilibili 视频身份校验失败，已拒绝使用字幕");
   }
 
   const pages = Array.isArray(viewData.pages) ? viewData.pages : [];
@@ -122,10 +125,11 @@ export async function fetchBilibiliSubtitleInBackground(
     title: viewData.title,
     description: viewData.desc,
     pageCount: pages.length,
-    selectedPage: selectedPage?.page ?? (pages.length === 1 ? 1 : undefined),
+    selectedPage: selectedPage?.page,
     selectedPagePart: selectedPage?.part,
   };
-  const cid = selectedPage?.cid ?? (pages.length === 0 ? viewData.cid : undefined);
+  const cid = selectedPage?.cid
+    ?? (pages.length === 0 && videoRef.pageNumber === undefined ? viewData.cid : undefined);
   const aid = viewData.aid ?? videoRef.aid;
   const bvid = viewData.bvid ?? videoRef.bvid;
   if (cid === undefined || (aid === undefined && bvid === undefined)) {
