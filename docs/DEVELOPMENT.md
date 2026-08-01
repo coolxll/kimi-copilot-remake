@@ -38,8 +38,8 @@
 - Bilibili API/字幕资源改由扩展后台脚本直拉，使用最小固定 host permissions 和浏览器会话，不读取或保存 Cookie；无字幕时补充少量页面评论摘录并明确标注其非正文性质。
 - YouTube 迁移 BiliNote 的人工字幕优先策略；从当前播放器状态、Performance timeline 或同源 InnerTube player 请求合并字幕轨，优先复用页面已带 PO Token 的 timedtext URL，再按 BiliNote 的去 `fmt` 方式和 yt-dlp 格式顺序读取 JSON3/SRV/TTML/SRT/WebVTT；当前 Web 字幕轨因客户端/PO Token 返回空内容时，回退读取 YouTube transcript 面板，再请求 Android VR、iOS、TV、VisionOS 客户端字幕，并保留时间戳和滚动字幕去重；无字幕时保留标题/简介，不接入本地 Whisper。
 - 选项页提供统一的提取器测试页，可对已打开或输入 URL 的 YouTube、Bilibili、普通网页和 PDF 查看实际 `sourceText` 与 warning；测试时按目标页面精确申请可选 origin 权限。
-- 已加入 ChatGPT、Gemini、DeepSeek 的实验性网页会话 Provider：优先复用用户已打开的同站点 Tab，否则创建后台 Tab；ChatGPT 优先在目标网页 MAIN world 中调用 Web conversation 接口，失败后回退 DOM，DeepSeek 使用目标网页 MAIN world 的 DOM 适配器，Gemini 优先参考 [gemini-nexus](https://github.com/yeahhe365/gemini-nexus) 调用短期 Web RPC 参数，失败后回退 DOM。三家都不保存站点 Cookie/Token，ChatGPT access token 与 Gemini RPC 参数都只在单次页面/请求内存中存在、不跨越到扩展状态；页面结构或内部协议变化会显示明确失败或走回退路径。
-- 设置页显示 Web 会话状态时只检查已打开站点页面的可见 DOM，检测到输入区/会话 UI 才显示“当前页面检测到已登录”，不创建页面、不提交请求、不保存 Token。
+- 已将 ChatGPT、Gemini、DeepSeek 的实验性网页会话 Provider 重构为后台 runtime Port + Web 协议流：登录时优先复用同站点 Tab，否则创建临时登录/验证 Tab；ChatGPT 缓存 `/api/auth/session` access token 并支持 conversation SSE/可靠 WebSocket，Gemini 每次刷新 `/app` 的短期参数并参考 [gemini-nexus](https://github.com/yeahhe365/gemini-nexus) 调用 `StreamGenerate`，DeepSeek 缓存 `userToken`、按需换取短时 access token，再执行会话创建、PoW 和 completion SSE。三家通过累计 Markdown 快照实时更新侧边栏，reasoning/thought 不进入 UI；登录/验证 Tab 只用于授权/WAF，不作为答案 DOM 兜底，协议变化显示明确错误。
+- Web 会话凭据按 Provider 保存在 `chrome.storage.local` 的独立 key；不读取或保存 Cookie、正文，Gemini `at/bl/f.sid` 只存在单次请求内存。设置页先检查本地凭据，没有凭据时才对已打开站点页面执行只读 DOM 状态检查；不创建检测标签页、不提交 Prompt。
 - YouTube 页面默认选择 Gemini Web，并直接提交当前视频 URL，不等待扩展字幕提取；这是 Gemini 专用能力，Kimi、ChatGPT、DeepSeek 和兼容 API 手动切换后仍走统一提取链路。
 - 本地打包 PDF.js worker；PDF 文本给兼容端，原始 PDF 给 Kimi。
 
@@ -61,7 +61,7 @@ Bilibili 和 YouTube 的字幕依赖登录态、站点接口及播放器页面�
 |---|---|---|
 | ESLint | `./node_modules/.bin/eslint .` | 通过 |
 | 类型检查 | `./node_modules/.bin/tsc --noEmit` | 通过 |
-| 单元测试 | `./node_modules/.bin/vitest run` | 13 个文件、56 个测试通过 |
+| 单元测试 | `./node_modules/.bin/vitest run` | 15 个文件、64 个测试通过 |
 | 生产构建 | `./node_modules/.bin/wxt build` | 通过 |
 
 构建包包含本地 `pdf.worker.mjs`，没有远程脚本。首次安装依赖后优先使用 `pnpm check` 复核全部质量门。

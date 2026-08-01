@@ -5,7 +5,7 @@
 - [ ] 使用 Chrome 140+ 的干净 profile。
 - [ ] 加载 `.output/chrome-mv3/`，确认没有远程脚本或启动错误。
 - [ ] 准备 Kimi、ChatGPT、Gemini、DeepSeek 登录态、一个可用的 Chat Completions 服务和一套短/长文本页面。
-- [ ] 测试结束后清除 Kimi 登录态、兼容 Token 和已授予的 API origin 权限；网页会话不应在扩展存储中留下 Cookie/Token。
+- [ ] 测试结束后清除 Kimi 登录态、网页会话凭据、兼容 Token 和已授予的 API origin 权限；扩展存储中不应留下 Cookie、正文或未脱敏 fixture。
 
 ## 设置与权限
 
@@ -25,13 +25,14 @@
 - [ ] 关闭侧边栏、点击取消、重新总结时旧流不能覆盖新结果。
 - [ ] 结果区域显示实际后端、warning、复制按钮；Kimi 显示继续对话，兼容端不显示无效链接。
 - [ ] 未配置后端显示打开选项页入口；Kimi 未登录显示登录入口。
-- [ ] ChatGPT/Gemini/DeepSeek 分别点击登录按钮打开目标站点；完成登录后在侧边栏逐一选择并重新总结，确认优先复用已打开的同站点 Tab、ChatGPT 优先走页面 Web API、失败时回退 DOM，未申请 cookies 权限，扩展存储中没有 Cookie/Token。
-- [ ] 设置页 Web 会话卡片对已打开且已登录的页面显示“当前页面检测到已登录”；关闭对应页面、退出登录或无页面时状态变化合理。检测过程不创建标签页、不提交 Prompt、不产生 Token 存储。
-- [ ] 三家分别验证一次已有页面会话和一次无已有页面会话；无已有页面时只创建后台 Tab，已有页面的当前 Chrome Profile 登录态可以直接使用。
-- [ ] Gemini Web 验证一次 RPC 优先路径：扩展网络请求能取得页面短期参数并解析 `StreamGenerate`；再模拟协议/参数失败，确认自动回退到 Gemini 页面 DOM，且扩展存储中没有 `at`、`bl`、`f.sid` 或 Cookie。
-- [ ] ChatGPT Web 验证一次页面 Web API 优先路径：在已登录 `chatgpt.com` 页面中能读取会话并解析 `/backend-api/conversation` 的 SSE；再模拟接口失败，确认自动回退到页面 DOM，且扩展存储中没有 access token 或 Cookie。
+- [ ] ChatGPT/Gemini/DeepSeek 分别点击登录按钮完成授权；确认 ChatGPT access token、DeepSeek `userToken` 和 Gemini 登录标记保存在扩展本地存储，Cookie、正文和短期 Gemini `at/bl/f.sid` 不进入存储。
+- [ ] 设置页 Web 会话卡片优先依据本地凭据显示登录状态；清除凭据后，对已打开页面才执行只读检测。关闭对应页面、退出登录或无页面时状态变化合理，检测过程不提交 Prompt。
+- [ ] 三家分别验证一次已有页面会话和一次无已有页面会话；已有页面被复用，无已有页面时只创建临时登录/验证 Tab，采集后扩展创建的 Tab 自动关闭，用户原有 Tab 不关闭。
+- [ ] ChatGPT Web 验证 Web conversation 普通 SSE 和可靠 WebSocket 两种 fixture/网络路径；确认首个快照出现后持续更新 Markdown，最终带 ChatGPT 原生会话链接，reasoning 不显示。
+- [ ] Gemini Web 验证后台重新读取 `/app` 短期参数并解析 `StreamGenerate`；确认 `at/bl/f.sid` 不落盘、快照实时替换且最终带 Gemini 原生会话链接。模拟协议/参数失败时显示明确错误，不回退 DOM 代答。
+- [ ] DeepSeek Web 验证会话创建、PoW challenge、`DeepSeekHashV1`/SHA-256 solver 和 completion SSE；确认只展示 `RESPONSE` Markdown，忽略 thinking，最终带 DeepSeek 原生会话链接。
 - [ ] 同一页面分别使用 Kimi、ChatGPT、Gemini、DeepSeek 和兼容端总结，记录输出长度、结构、事实遗漏和 warning；网页结构变化时应显示明确失败，不得静默使用另一家结果。
-- [ ] YouTube 页面选择 Gemini Web 总结时确认不等待扩展字幕提取，Prompt 中包含当前 YouTube URL，并由 Gemini 返回视频总结；切换到其他后端时仍验证各自的提取器路径。
+- [ ] YouTube 页面选择 Gemini Web 总结时确认不等待扩展字幕提取，Prompt 中包含当前 YouTube URL，并由 Gemini 返回视频总结；协议失败显示错误而不是使用 DOM 答案，切换到其他后端时仍验证各自的提取器路径。
 
 ## 内容类型
 
@@ -55,6 +56,7 @@
 - [ ] 模拟 401/403，不重试、不切到 Kimi。
 - [ ] 模拟上下文超限，当前块减半；仍失败时显示降低单块字符数提示。
 - [ ] 取消请求后不再出现增量文本或旧结果覆盖。
+- [ ] ChatGPT/Gemini/DeepSeek 生成中点击取消或关闭侧边栏，确认 runtime Port、SSE/WebSocket 和后台请求均停止，旧快照不覆盖新任务。
 
 ## 发布前检查
 
