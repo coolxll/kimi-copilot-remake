@@ -17,45 +17,106 @@ export interface FeedlyCandidateSnapshot {
   text: string;
   score: number;
   feedlyFrame: boolean;
+  entryId?: string;
+}
+
+export interface FeedlyListItemSnapshot extends FeedlyCandidateSnapshot {
+  order: number;
 }
 
 export interface FeedlyFrameSnapshot {
   frameUrl: string;
   pageTitle: string;
+  /** Kept for compatibility with callers that model a single article frame. */
   candidate?: FeedlyCandidateSnapshot;
+  articleCandidate?: FeedlyCandidateSnapshot;
+  listItems?: FeedlyListItemSnapshot[];
+}
+
+export interface FeedlyPageSnapshot {
+  frameUrl: string;
+  pageTitle: string;
+  articleCandidate?: FeedlyCandidateSnapshot;
+  listItems: FeedlyListItemSnapshot[];
 }
 
 export function isFeedlyArticleUrl(value: string): boolean {
   try {
     const url = new URL(value);
     if (!/(^|\.)feedly\.com$/i.test(url.hostname) || !url.pathname.startsWith("/i/")) return false;
-    const state = `${url.searchParams.get("s") ?? ""} ${url.hash}`.toLowerCase();
-    return state.includes("entry:") || /\/read(?:\/|$)/i.test(url.pathname);
+    // Feedly keeps both the reader and collection/list views below /i/. A
+    // list view has no entry state in the URL, but is still an extractable
+    // Feedly page.
+    return true;
   } catch {
     return false;
   }
 }
 
+/**
+ * A rendered Feedly reading pane is authoritative. The API is only a fallback
+ * when the page did not expose either an open article or a list.
+ */
 export function chooseFeedlySource(
   domCandidate: FeedlyCandidateSnapshot | undefined,
   apiCandidate: FeedlyCandidateSnapshot | undefined,
 ): FeedlyCandidateSnapshot | undefined {
-  if (!domCandidate) return apiCandidate;
-  if (!apiCandidate) return domCandidate;
-  return apiCandidate.text.length > domCandidate.text.length ? apiCandidate : domCandidate;
+  return domCandidate ?? apiCandidate;
 }
 
 export function chooseFeedlyCandidate(frames: FeedlyFrameSnapshot[]): FeedlyCandidateSnapshot | undefined {
   const candidates = frames
-    .map((frame) => frame.candidate)
-    .filter((candidate): candidate is FeedlyCandidateSnapshot => Boolean(candidate && candidate.text.trim()))
+    .flatMap((frame) => [frame.articleCandidate, frame.listItems?.length ? undefined : frame.candidate])
+    .filter((candidate): candidate is FeedlyCandidateSnapshot => Boolean(candidate?.feedlyFrame && candidate.text.trim()))
     .sort(compareFeedlyCandidates);
   return candidates.find((candidate) => candidate.text.trim().length >= FEEDLY_MIN_TEXT) ?? candidates[0];
+}
+
+export function chooseFeedlySnapshot(frames: FeedlyFrameSnapshot[]): FeedlyPageSnapshot | undefined {
+  const articleCandidates = frames
+    .flatMap((frame) => [frame.articleCandidate, frame.listItems?.length ? undefined : frame.candidate])
+    .filter((candidate): candidate is FeedlyCandidateSnapshot => Boolean(candidate?.feedlyFrame && candidate.text.trim()))
+    .sort(compareFeedlyCandidates);
+  const listFrame = frames
+    .map((frame) => ({ frame, listItems: (frame.listItems ?? []).filter((item) => item.feedlyFrame) }))
+    .filter(({ listItems }) => listItems.some((item) => item.feedlyFrame))
+    .sort((left, right) => compareFeedlyListFrames(left.listItems, right.listItems))[0];
+  const articleCandidate = articleCandidates[0];
+  if (!articleCandidate && !listFrame) return undefined;
+  return {
+    frameUrl: articleCandidate?.frameUrl ?? listFrame?.frame.frameUrl ?? "",
+    pageTitle: articleCandidate?.pageTitle ?? listFrame?.frame.pageTitle ?? "",
+    articleCandidate,
+    listItems: listFrame?.listItems ?? [],
+  };
 }
 
 export function compareFeedlyCandidates(left: FeedlyCandidateSnapshot, right: FeedlyCandidateSnapshot): number {
   const quality = candidateQuality(right) - candidateQuality(left);
   return quality || right.text.length - left.text.length;
+}
+
+export function formatFeedlyList(
+  title: string,
+  items: FeedlyListItemSnapshot[],
+): { markdown: string; html: string } {
+  const listTitle = title.trim() || "Feedly 列表";
+  const markdownItems = items.map((item, index) => {
+    const itemTitle = item.title.trim() || `条目 ${index + 1}`;
+    const cleanHtml = cleanHtmlForUpload(item.html);
+    const body = stripLeadingTitle(htmlToMarkdown(cleanHtml) || item.text.trim(), itemTitle);
+    return `## ${index + 1}. ${itemTitle}${body ? `\n\n${body}` : ""}`;
+  });
+  const htmlItems = items.map((item, index) => {
+    const itemTitle = item.title.trim() || `条目 ${index + 1}`;
+    const cleanHtml = cleanHtmlForUpload(item.html) || `<p>${escapeHtml(item.text.trim())}</p>`;
+    const entryId = item.entryId ? ` data-feedly-entry-id="${escapeHtml(item.entryId)}"` : "";
+    return `<article${entryId}><h2>${escapeHtml(`${index + 1}. ${itemTitle}`)}</h2>${cleanHtml}</article>`;
+  });
+  return {
+    markdown: `# ${listTitle}\n\n${markdownItems.join("\n\n")}`.trim(),
+    html: `<section data-feedly-list="true">${htmlItems.join("\n")}</section>`,
+  };
 }
 
 export class FeedlyExtractor implements ContentExtractor {
@@ -67,41 +128,71 @@ export class FeedlyExtractor implements ContentExtractor {
 
   async extract(context: PageContext, signal: AbortSignal): Promise<ExtractedDocument> {
     const entryId = parseFeedlyEntryId(context.url);
-    const [domCandidate, apiEntry] = await Promise.all([
-      readFeedlyCandidate(context.tabId, signal).catch((error: unknown) => {
-        if (signal.aborted) throw error;
-        return undefined;
-      }),
-      entryId ? fetchFeedlyEntry(entryId, signal) : Promise.resolve(undefined),
-    ]);
-    const apiCandidate = apiEntry ? createApiCandidate(apiEntry, context.url) : undefined;
-    const candidate = chooseFeedlySource(domCandidate, apiCandidate);
-    if (!candidate) throw new AppError("extraction-failed", "无法读取 Feedly 当前文章，请确认文章已经打开并完成加载");
-    const title = candidate.title || context.title || candidate.pageTitle || "Feedly 文章";
-    const cleanHtml = cleanHtmlForUpload(candidate.html);
-    const bodyMarkdown = htmlToMarkdown(cleanHtml) || candidate.text.trim();
-    const markdown = bodyMarkdown && title && !bodyMarkdown.startsWith(`# ${title}`)
-      ? `# ${title}\n\n${bodyMarkdown}`
-      : bodyMarkdown;
-    if (!markdown.trim()) {
-      return {
-        kind: "webpage",
-        title,
-        sourceUrl: context.url,
-        sourceText: "",
-        warnings: ["Feedly 当前文章没有可读取的正文"],
-      };
+    const pageSnapshot = await readFeedlySnapshot(context.tabId, entryId, signal).catch((error: unknown) => {
+      if (signal.aborted) throw error;
+      return undefined;
+    });
+
+    // The open reading pane wins over every list item. This also prevents the
+    // URL's entry ID from accidentally turning a list view into API article mode.
+    if (pageSnapshot?.articleCandidate && isUsableCandidate(pageSnapshot.articleCandidate)) {
+      return createArticleDocument(context, pageSnapshot.articleCandidate);
+    }
+    if (pageSnapshot?.listItems.length) {
+      return createListDocument(context, pageSnapshot);
     }
 
+    // If the DOM was unavailable (for example during a Feedly navigation), use
+    // the exact entry from the API as a last-resort article fallback.
+    if (entryId) {
+      const apiEntry = await fetchFeedlyEntry(entryId, signal);
+      const apiCandidate = apiEntry ? createApiCandidate(apiEntry, context.url) : undefined;
+      const candidate = chooseFeedlySource(undefined, apiCandidate);
+      if (candidate) return createArticleDocument(context, candidate);
+    }
+
+    throw new AppError("extraction-failed", "无法读取 Feedly 当前内容，请确认 Feedly 列表或正文已经完成加载");
+  }
+}
+
+function createArticleDocument(context: PageContext, candidate: FeedlyCandidateSnapshot): ExtractedDocument {
+  const title = candidate.title || context.title || candidate.pageTitle || "Feedly 文章";
+  const cleanHtml = cleanHtmlForUpload(candidate.html);
+  const bodyMarkdown = htmlToMarkdown(cleanHtml) || candidate.text.trim();
+  const markdown = bodyMarkdown && title && !bodyMarkdown.startsWith(`# ${title}`)
+    ? `# ${title}\n\n${bodyMarkdown}`
+    : bodyMarkdown;
+  if (!markdown.trim()) {
     return {
       kind: "webpage",
       title,
       sourceUrl: context.url,
-      sourceText: markdown,
-      uploadFile: new File([wrapHtml(title, cleanHtml)], `${safeFilename(title)}.html`, { type: "text/html" }),
-      warnings: [],
+      sourceText: "",
+      warnings: ["Feedly 当前文章没有可读取的正文"],
     };
   }
+
+  return {
+    kind: "webpage",
+    title,
+    sourceUrl: context.url,
+    sourceText: markdown,
+    uploadFile: new File([wrapHtml(title, cleanHtml)], `${safeFilename(title)}.html`, { type: "text/html" }),
+    warnings: [],
+  };
+}
+
+function createListDocument(context: PageContext, snapshot: FeedlyPageSnapshot): ExtractedDocument {
+  const title = context.title || snapshot.pageTitle || "Feedly 列表";
+  const formatted = formatFeedlyList(title, snapshot.listItems);
+  return {
+    kind: "webpage",
+    title,
+    sourceUrl: context.url,
+    sourceText: formatted.markdown,
+    uploadFile: new File([wrapHtml(title, formatted.html)], `${safeFilename(title)}.html`, { type: "text/html" }),
+    warnings: [],
+  };
 }
 
 function createApiCandidate(entry: FeedlyEntryContent, sourceUrl: string): FeedlyCandidateSnapshot | undefined {
@@ -119,8 +210,12 @@ function createApiCandidate(entry: FeedlyEntryContent, sourceUrl: string): Feedl
   };
 }
 
-async function readFeedlyCandidate(tabId: number, signal: AbortSignal): Promise<FeedlyCandidateSnapshot> {
-  let lastCandidate: FeedlyCandidateSnapshot | undefined;
+async function readFeedlySnapshot(
+  tabId: number,
+  expectedEntryId: string | undefined,
+  signal: AbortSignal,
+): Promise<FeedlyPageSnapshot> {
+  let bestSnapshot: FeedlyPageSnapshot | undefined;
   let lastError: unknown;
   let tryAllFrames = true;
 
@@ -128,22 +223,22 @@ async function readFeedlyCandidate(tabId: number, signal: AbortSignal): Promise<
     if (signal.aborted) throw new AppError("cancelled", "已取消");
 
     try {
-      const frames = await executeFeedlyScript(tabId, tryAllFrames);
-      const candidate = chooseFeedlyCandidate(frames);
-      if (candidate && isUsableCandidate(candidate)) {
-        lastCandidate = candidate;
-        if (candidate.text.trim().length >= FEEDLY_READY_TEXT) return candidate;
+      const frames = await executeFeedlyScript(tabId, expectedEntryId, tryAllFrames);
+      const snapshot = chooseFeedlySnapshot(frames);
+      if (snapshot) {
+        if (!bestSnapshot || pageSnapshotQuality(snapshot) > pageSnapshotQuality(bestSnapshot)) bestSnapshot = snapshot;
+        if (snapshot.articleCandidate && isUsableCandidate(snapshot.articleCandidate)) return snapshot;
       }
     } catch (error) {
       lastError = error;
       if (tryAllFrames) {
         tryAllFrames = false;
         try {
-          const frames = await executeFeedlyScript(tabId, false);
-          const candidate = chooseFeedlyCandidate(frames);
-          if (candidate && isUsableCandidate(candidate)) {
-            lastCandidate = candidate;
-            if (candidate.text.trim().length >= FEEDLY_READY_TEXT) return candidate;
+          const frames = await executeFeedlyScript(tabId, expectedEntryId, false);
+          const snapshot = chooseFeedlySnapshot(frames);
+          if (snapshot) {
+            if (!bestSnapshot || pageSnapshotQuality(snapshot) > pageSnapshotQuality(bestSnapshot)) bestSnapshot = snapshot;
+            if (snapshot.articleCandidate && isUsableCandidate(snapshot.articleCandidate)) return snapshot;
           }
         } catch (fallbackError) {
           lastError = fallbackError;
@@ -154,24 +249,29 @@ async function readFeedlyCandidate(tabId: number, signal: AbortSignal): Promise<
     if (attempt < 9) await delay(250, signal);
   }
 
-  if (lastCandidate) return lastCandidate;
-  throw new AppError("extraction-failed", "无法读取 Feedly 当前文章，请确认文章已经打开并完成加载", { cause: lastError });
+  if (bestSnapshot) return bestSnapshot;
+  throw new AppError("extraction-failed", "无法读取 Feedly 当前内容，请确认 Feedly 列表或正文已经完成加载", { cause: lastError });
 }
 
 function isUsableCandidate(candidate: FeedlyCandidateSnapshot): boolean {
   return candidate.text.trim().length >= FEEDLY_MIN_TEXT || candidate.score >= 150;
 }
 
-async function executeFeedlyScript(tabId: number, allFrames: boolean): Promise<FeedlyFrameSnapshot[]> {
+async function executeFeedlyScript(
+  tabId: number,
+  expectedEntryId: string | undefined,
+  allFrames: boolean,
+): Promise<FeedlyFrameSnapshot[]> {
   const result = await browser.scripting.executeScript({
     target: allFrames ? { tabId, allFrames: true } : { tabId },
     world: "MAIN",
     func: collectFeedlyFrame,
+    args: [expectedEntryId ?? null],
   }) as Array<{ result?: FeedlyFrameSnapshot }>;
   return result.map((entry) => entry.result).filter((value): value is FeedlyFrameSnapshot => Boolean(value));
 }
 
-function collectFeedlyFrame(): FeedlyFrameSnapshot {
+function collectFeedlyFrame(expectedEntryId: string | null): FeedlyFrameSnapshot {
   const normalize = (value: string): string => value
     .replace(/\u00a0/g, " ")
     .replace(/[ \t]+\n/g, "\n")
@@ -188,13 +288,14 @@ function collectFeedlyFrame(): FeedlyFrameSnapshot {
       && rect.width > 20
       && rect.height > 20;
   };
+  const textOf = (element: Element): string => {
+    const htmlElement = element as HTMLElement;
+    return normalize(htmlElement.innerText || element.textContent || "");
+  };
   const feedlyFrame = /(^|\.)feedly\.com$/i.test(location.hostname);
   const pageTitle = normalize(document.querySelector("meta[property='og:title']")?.getAttribute("content") || document.title || "");
-  const selectors = feedlyFrame
+  const entrySelectors = feedlyFrame
     ? [
-        // These are the entry and reading-pane selectors used by the old
-        // Feedly Curator extension. Keep the exact casing: class selectors
-        // are case-sensitive in CSS.
         "[data-entry-id]",
         "[data-entryid]",
         "article.entry",
@@ -205,56 +306,66 @@ function collectFeedlyFrame(): FeedlyFrameSnapshot {
         ".Article",
         ".entry--overlay",
         "article.Article",
+      ]
+    : ["article", "[role='article']"];
+  const entrySelector = entrySelectors.join(",");
+  const bodySelectors = feedlyFrame
+    ? [
         ".EntryBody",
-        ".content",
-        ".entryContent",
         ".entryBody",
-        ".entry__content",
-        ".ArticleBody",
-        ".Article__content",
-        ".entry-content",
-        "[data-testid*='article']",
-        "[data-test-id*='article']",
-        "[aria-label*='Article']",
+        ".entry-body",
         ".entry-body-content",
         ".entryBodyContent",
-        ".entry-body",
-        ".entryBody",
-        ".entry-content",
+        ".entry__content",
+        ".EntryContent",
         ".entryContent",
+        ".entry-content",
+        ".ArticleBody",
+        ".Article__content",
         ".article-body",
         ".articleBody",
         ".article-content",
         ".articleContent",
-        "[class*='entry-body']",
-        "[class*='entry-content']",
-        "[class*='article-body']",
-        "[class*='article-content']",
-        "article",
-        "[role='article']",
-        "main",
-      ]
-    : [
         "[itemprop='articleBody']",
-        "article",
-        "[role='article']",
-        "main",
-        "[role='main']",
-      ];
-  const candidates: FeedlyCandidateSnapshot[] = [];
-  const seen = new Set<Element>();
-  const entrySelector = [
-    "[data-entry-id]",
-    "[data-entryid]",
-    "article.entry",
-    ".Entry",
-    ".entry--titleOnly",
-    ".entry--magazine",
-    ".entry--cards",
-    ".Article",
-    ".entry--overlay",
-    "article.Article",
-  ].join(",");
+        ".EntrySummary",
+        ".entry__summary",
+        ".entrySummary",
+        ".content",
+      ]
+    : ["[itemprop='articleBody']", "article", "[role='article']"];
+  const strongBodySelectors = [
+    ".EntryBody",
+    ".entryBody",
+    ".entry-body",
+    ".entry-body-content",
+    ".entryBodyContent",
+    ".entry__content",
+    ".EntryContent",
+    ".entryContent",
+    ".entry-content",
+    ".ArticleBody",
+    ".Article__content",
+    ".article-body",
+    ".articleBody",
+    ".article-content",
+    ".articleContent",
+    "[itemprop='articleBody']",
+  ];
+  const readingSelectors = [
+    "#entry-content",
+    ".reading-pane",
+    ".readingPane",
+    ".EntryReader",
+    ".entryReader",
+    ".entry-reader",
+    ".article-reader",
+    ".articleReader",
+    ".entry-content-expanded",
+    "[data-testid*='reader']",
+    "[data-test-id*='reader']",
+    "[data-testid*='reading']",
+    "[data-test-id*='reading']",
+  ];
   const titleSelectors = [
     ".EntryTitleLink",
     ".entry-title-link",
@@ -267,63 +378,241 @@ function collectFeedlyFrame(): FeedlyFrameSnapshot {
     "[data-testid*='title']",
     "[data-test-id*='title']",
     "h1",
+    "h2",
+    "h3",
   ];
-  const findVisibleText = (root: Element, selectorsToTry: string[]): string => {
-    for (const titleSelector of selectorsToTry) {
-      const titleElement = root.querySelector(titleSelector);
-      if (!titleElement || !isVisible(titleElement)) continue;
-      const text = normalize((titleElement as HTMLElement).innerText || titleElement.textContent || "");
-      if (text) return text;
+  const matchesAny = (element: Element, selectors: string[]): boolean => selectors.some((selector) => {
+    try {
+      return element.matches(selector);
+    } catch {
+      return false;
     }
-    return "";
+  });
+  const findVisibleElement = (root: Element, selectors: string[]): Element | undefined => {
+    for (const selector of selectors) {
+      const direct = root.matches(selector) && isVisible(root) ? root : undefined;
+      if (direct) return direct;
+      const found = Array.from(root.querySelectorAll(selector)).find(isVisible);
+      if (found) return found;
+    }
+    return undefined;
   };
-  const addCandidate = (element: Element, selector: string): void => {
-    if (seen.has(element) || !isVisible(element)) return;
-    seen.add(element);
-    const htmlElement = element as HTMLElement;
-    const text = normalize(htmlElement.innerText || htmlElement.textContent || "");
-    if (!text) return;
-    const identity = `${element.id} ${element.getAttribute("class") || ""} ${selector}`.toLowerCase();
-    const compactIdentity = identity.replace(/[-_ ]/g, "");
-    const rect = htmlElement.getBoundingClientRect();
-    const paragraphCount = element.querySelectorAll("p").length;
-    const headingCount = element.querySelectorAll("h1,h2,h3").length;
-    const linkCount = element.querySelectorAll("a").length;
-    let score = Math.min(text.length, 30_000) / 150;
-    score += Math.min(rect.width * rect.height, 500_000) / 1_000;
-    if (/(entry|article)[-_ ]?(body|content)/.test(identity) || /(entry|article)(body|content)/.test(compactIdentity)) score += 240;
-    else if (/\barticle\b/.test(identity)) score += 150;
-    else if (/\bentry\b/.test(identity)) score += 80;
-    if (/entry--selected|entry--expanded/.test(identity)) score += 200;
-    if (/^article$|\[role='article'\]/.test(selector)) score += 120;
-    if (/\bmain\b/.test(selector)) score += 20;
-    if (/(sidebar|toolbar|navigation|nav|feed[-_ ]?list|stream|card|header|footer|menu|button|action)/.test(identity)) score -= 180;
-    score += Math.min(paragraphCount, 30) * 5 + Math.min(headingCount, 4) * 12;
-    if (linkCount > paragraphCount * 3 + 10) score -= 80;
-    if (element === document.body) score -= 180;
-
-    const entryRoot = element.closest(entrySelector);
-    let title = findVisibleText(element, titleSelectors);
-    if (!title && entryRoot && entryRoot !== element) title = findVisibleText(entryRoot, titleSelectors);
-    if (!title) title = normalize(document.querySelector("meta[property='og:title']")?.getAttribute("content") || "");
-    candidates.push({ frameUrl: location.href, pageTitle, title, html: element.outerHTML, text, score, feedlyFrame });
+  const findVisibleText = (root: Element, selectors: string[]): string => {
+    const element = findVisibleElement(root, selectors);
+    return element ? textOf(element) : "";
+  };
+  const getOwnEntryId = (element: Element | null): string | undefined => {
+    if (!element) return undefined;
+    const direct = element.getAttribute("data-entry-id")
+      || element.getAttribute("data-entryid")
+      || element.getAttribute("data-id");
+    if (direct?.trim()) return direct.trim();
+    const href = element.querySelector("a[href*='/entry/']")?.getAttribute("href") || "";
+    const entryMatch = href.match(/\/entry\/([^/?#]+)/i);
+    if (entryMatch?.[1]) {
+      try {
+        return decodeURIComponent(entryMatch[1]);
+      } catch {
+        return entryMatch[1];
+      }
+    }
+    const id = element.getAttribute("id") || "";
+    return /entry/i.test(id) ? id.replace(/_main$/i, "") : undefined;
+  };
+  const getEntryId = (element: Element | null): string | undefined => {
+    const ownId = getOwnEntryId(element);
+    if (ownId) return ownId;
+    const descendant = element?.querySelector("[data-entry-id], [data-entryid], [data-id]");
+    const descendantId = descendant?.getAttribute("data-entry-id")
+      || descendant?.getAttribute("data-entryid")
+      || descendant?.getAttribute("data-id");
+    return descendantId?.trim() || undefined;
+  };
+  const isSelectedEntry = (element: Element): boolean => {
+    const identity = `${element.id} ${element.getAttribute("class") || ""}`.toLowerCase();
+    return element.getAttribute("aria-selected") === "true"
+      || element.getAttribute("aria-current") === "true"
+      || element.getAttribute("data-selected") === "true"
+      || element.getAttribute("data-expanded") === "true"
+      || /entry[-_ ]?(selected|expanded|active|current)|\b(selected|expanded|active|current)\b/.test(identity);
+  };
+  const contentQuality = (element: Element, root: Element): number => {
+    const text = textOf(element);
+    if (!text) return -Infinity;
+    const identity = `${element.id} ${element.getAttribute("class") || ""}`.toLowerCase();
+    let score = Math.min(text.length, 30_000) / 120;
+    if (matchesAny(element, strongBodySelectors)) score += 240;
+    if (matchesAny(element, readingSelectors)) score += 260;
+    if (/summary/.test(identity)) score += 160;
+    if (element === root) score += 20;
+    if (/(toolbar|navigation|sidebar|header|footer|menu|button|action)/.test(identity)) score -= 180;
+    return score;
+  };
+  const chooseContentElement = (root: Element): Element => {
+    const elements: Element[] = [root];
+    const seen = new Set<Element>(elements);
+    for (const selector of bodySelectors) {
+      for (const element of Array.from(root.querySelectorAll(selector)).slice(0, 8)) {
+        if (seen.has(element) || !isVisible(element)) continue;
+        seen.add(element);
+        elements.push(element);
+      }
+    }
+    return elements.sort((left, right) => contentQuality(right, root) - contentQuality(left, root))[0] || root;
+  };
+  const createCandidate = (root: Element, scoreBonus = 0, fallbackToPageTitle = true): FeedlyCandidateSnapshot | undefined => {
+    if (!isVisible(root)) return undefined;
+    const entryRoot = root.closest(entrySelector);
+    const contentElement = chooseContentElement(root);
+    const text = textOf(contentElement) || textOf(root);
+    if (!text) return undefined;
+    const titleRoot = entryRoot || root;
+    const title = findVisibleText(titleRoot, titleSelectors)
+      || (titleRoot !== root ? findVisibleText(root, titleSelectors) : "")
+      || (fallbackToPageTitle ? pageTitle : "");
+    const identity = `${root.id} ${root.getAttribute("class") || ""}`.toLowerCase();
+    let score = Math.min(text.length, 30_000) / 150 + scoreBonus;
+    if (matchesAny(root, strongBodySelectors) || matchesAny(contentElement, strongBodySelectors)) score += 240;
+    if (matchesAny(root, readingSelectors) || matchesAny(contentElement, readingSelectors)) score += 260;
+    if (entryRoot) score += 80;
+    if (entryRoot && isSelectedEntry(entryRoot)) score += 320;
+    if (expectedEntryId && getEntryId(entryRoot) === expectedEntryId) score += 100;
+    if (/article/.test(identity)) score += 120;
+    if (/(toolbar|navigation|sidebar|header|footer|menu|button|action)/.test(identity)) score -= 180;
+    return {
+      frameUrl: location.href,
+      pageTitle,
+      title,
+      html: contentElement.outerHTML,
+      text,
+      score,
+      feedlyFrame,
+      entryId: getEntryId(entryRoot || root),
+    };
   };
 
-  for (const selector of selectors) {
-    for (const element of Array.from(document.querySelectorAll(selector)).slice(0, 12)) addCandidate(element, selector);
+  const rawEntries = Array.from(document.querySelectorAll(entrySelector)).filter(isVisible);
+  const entryRoots: Element[] = [];
+  for (const element of rawEntries) {
+    const ownEntryId = getOwnEntryId(element);
+    const nestedEntryIds = new Set(
+      Array.from(element.querySelectorAll(entrySelector))
+        .map((child) => getOwnEntryId(child))
+        .filter((value): value is string => Boolean(value)),
+    );
+    if (!ownEntryId && nestedEntryIds.size > 1) continue;
+    const entryId = getEntryId(element);
+    const containingIndex = entryRoots.findIndex((root) => root.contains(element));
+    if (containingIndex >= 0) {
+      const containingId = getEntryId(entryRoots[containingIndex]);
+      if (!entryId || containingId === entryId) continue;
+      if (!containingId && entryId) entryRoots.splice(containingIndex, 1);
+      else continue;
+    }
+    const duplicateIndex = entryRoots.findIndex((root) => entryId && getEntryId(root) === entryId);
+    if (duplicateIndex >= 0) continue;
+    const nestedDistinctEntry = Array.from(element.querySelectorAll(entrySelector)).some((child) => {
+      const childId = getEntryId(child);
+      return Boolean(childId && childId !== entryId);
+    });
+    if (!entryId && nestedDistinctEntry) continue;
+    entryRoots.push(element);
   }
-  if (!candidates.length || !feedlyFrame) addCandidate(document.body, "body");
 
-  candidates.sort((left, right) => {
+  const listItems: FeedlyListItemSnapshot[] = [];
+  const seenListKeys = new Set<string>();
+  entryRoots.forEach((root, index) => {
+    const candidate = createCandidate(root, 0, false);
+    if (!candidate || (!candidate.title && candidate.text.length < 20)) return;
+    const key = candidate.entryId || `${candidate.title}\n${candidate.text}`;
+    if (seenListKeys.has(key)) return;
+    seenListKeys.add(key);
+    listItems.push({ ...candidate, order: index });
+  });
+
+  const articleCandidates: FeedlyCandidateSnapshot[] = [];
+  const seenArticleRoots = new Set<Element>();
+  const addArticleCandidate = (root: Element | null | undefined, scoreBonus = 0): void => {
+    if (!root || seenArticleRoots.has(root) || !isVisible(root)) return;
+    const entryRoot = root.closest(entrySelector);
+    const openEntry = !entryRoot || isSelectedEntry(entryRoot);
+    const directReading = matchesAny(root, readingSelectors);
+    const strongBody = matchesAny(root, strongBodySelectors);
+    if (!openEntry && !directReading) return;
+    if (!entryRoot && !directReading && !strongBody) return;
+    const candidate = createCandidate(root, scoreBonus);
+    if (!candidate || candidate.text.length < 20) return;
+    seenArticleRoots.add(root);
+    articleCandidates.push(candidate);
+  };
+
+  entryRoots.filter(isSelectedEntry).forEach((root) => addArticleCandidate(root, 180));
+  for (const selector of readingSelectors) {
+    for (const element of Array.from(document.querySelectorAll(selector)).slice(0, 12)) addArticleCandidate(element, 160);
+  }
+  for (const selector of strongBodySelectors) {
+    for (const element of Array.from(document.querySelectorAll(selector)).slice(0, 12)) addArticleCandidate(element);
+  }
+  if (!articleCandidates.length && !entryRoots.length) {
+    for (const selector of ["article", "[role='article']", "main", "[role='main']"]) {
+      for (const element of Array.from(document.querySelectorAll(selector)).slice(0, 4)) {
+        const candidate = createCandidate(element, 40);
+        if (candidate && candidate.text.length >= FEEDLY_READY_TEXT) articleCandidates.push(candidate);
+      }
+    }
+  }
+  articleCandidates.sort((left, right) => {
+    if (expectedEntryId) {
+      const expectedPriority = Number(right.entryId === expectedEntryId) - Number(left.entryId === expectedEntryId);
+      if (expectedPriority) return expectedPriority;
+    }
     const quality = (right.score + Math.min(right.text.length, 30_000) / 400)
       - (left.score + Math.min(left.text.length, 30_000) / 400);
     return quality || right.text.length - left.text.length;
   });
-  return { frameUrl: location.href, pageTitle, candidate: candidates[0] };
+
+  return {
+    frameUrl: location.href,
+    pageTitle,
+    articleCandidate: articleCandidates[0],
+    listItems,
+  };
 }
 
 function candidateQuality(candidate: FeedlyCandidateSnapshot): number {
   return candidate.score + Math.min(candidate.text.trim().length, 30_000) / 400;
+}
+
+function compareFeedlyListFrames(
+  left: FeedlyListItemSnapshot[],
+  right: FeedlyListItemSnapshot[],
+): number {
+  const count = right.length - left.length;
+  if (count) return count;
+  const text = right.reduce((sum, item) => sum + item.text.length, 0)
+    - left.reduce((sum, item) => sum + item.text.length, 0);
+  return text;
+}
+
+function pageSnapshotQuality(snapshot: FeedlyPageSnapshot): number {
+  if (snapshot.articleCandidate) return 1_000_000 + candidateQuality(snapshot.articleCandidate);
+  return snapshot.listItems.length * 10_000
+    + snapshot.listItems.reduce((sum, item) => sum + Math.min(item.text.length, 30_000) / 100, 0);
+}
+
+function stripLeadingTitle(markdown: string, title: string): string {
+  const lines = markdown.trim().split("\n");
+  const first = lines[0]?.replace(/^#{1,6}\s+/, "").trim();
+  return first && first === title.trim() ? lines.slice(1).join("\n").trim() : markdown.trim();
+}
+
+function escapeHtml(value: string): string {
+  return value
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
 }
 
 function delay(milliseconds: number, signal: AbortSignal): Promise<void> {

@@ -1,5 +1,15 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { chooseFeedlyCandidate, chooseFeedlySource, compareFeedlyCandidates, FeedlyExtractor, isFeedlyArticleUrl, type FeedlyFrameSnapshot } from "../../src/extractors/feedly";
+import {
+  chooseFeedlyCandidate,
+  chooseFeedlySnapshot,
+  chooseFeedlySource,
+  compareFeedlyCandidates,
+  FeedlyExtractor,
+  formatFeedlyList,
+  isFeedlyArticleUrl,
+  type FeedlyFrameSnapshot,
+  type FeedlyListItemSnapshot,
+} from "../../src/extractors/feedly";
 import { createExtractorRegistry, selectExtractor } from "../../src/extractors/registry";
 import { fetchFeedlyEntry, parseFeedlyEntryId } from "../../src/platform/chrome/feedly";
 
@@ -25,10 +35,24 @@ function frame(candidate: Partial<NonNullable<FeedlyFrameSnapshot["candidate"]>>
   };
 }
 
+function listItem(overrides: Partial<FeedlyListItemSnapshot> = {}): FeedlyListItemSnapshot {
+  return {
+    frameUrl: "https://feedly.com/i/my/me",
+    pageTitle: "Feedly",
+    title: "",
+    html: "<p></p>",
+    text: "",
+    score: 0,
+    feedlyFrame: true,
+    order: 0,
+    ...overrides,
+  };
+}
+
 describe("Feedly article URL detection", () => {
   it("recognizes the entry URL opened in the Feedly reader", () => {
     expect(isFeedlyArticleUrl("https://feedly.com/i/my/me?s=entry:G%2Fexample")).toBe(true);
-    expect(isFeedlyArticleUrl("https://feedly.com/i/my/me")).toBe(false);
+    expect(isFeedlyArticleUrl("https://feedly.com/i/my/me")).toBe(true);
     expect(isFeedlyArticleUrl("https://example.com/i/my/me?s=entry:G%2Fexample")).toBe(false);
   });
 
@@ -42,6 +66,10 @@ describe("Feedly article URL detection", () => {
       url: "https://feedly.com/i/my/me?s=entry:G%2Fexample",
     });
     expect(extractor).toBeInstanceOf(FeedlyExtractor);
+    expect(selectExtractor(createExtractorRegistry(), {
+      tabId: 1,
+      url: "https://feedly.com/i/my/me",
+    })).toBeInstanceOf(FeedlyExtractor);
   });
 });
 
@@ -66,11 +94,44 @@ describe("Feedly article candidate selection", () => {
     expect(compareFeedlyCandidates(short, long)).toBeGreaterThan(0);
   });
 
-  it("prefers the Feedly API article only when it contains more text", () => {
+  it("keeps the rendered article over a longer API fallback", () => {
     const dom = frame({ text: "页面正文".repeat(20) }).candidate!;
     const api = frame({ title: "API 标题", text: "API 正文".repeat(40) }).candidate!;
-    expect(chooseFeedlySource(dom, api)).toBe(api);
-    expect(chooseFeedlySource(dom, frame({ text: "更短 API" }).candidate!)).toBe(dom);
+    expect(chooseFeedlySource(dom, api)).toBe(dom);
+    expect(chooseFeedlySource(undefined, api)).toBe(api);
+  });
+
+  it("keeps list mode separate from an opened article", () => {
+    const list = [
+      listItem({ order: 0, entryId: "entry-1", title: "第一篇", text: "第一篇摘要" }),
+      listItem({ order: 1, entryId: "entry-2", title: "第二篇", text: "第二篇摘要" }),
+    ];
+    const snapshot = chooseFeedlySnapshot([
+      { frameUrl: "https://feedly.com/i/my/me", pageTitle: "Feedly", listItems: list },
+    ]);
+    expect(snapshot?.articleCandidate).toBeUndefined();
+    expect(snapshot?.listItems.map((item) => item.title)).toEqual(["第一篇", "第二篇"]);
+
+    const opened = frame({ title: "已打开正文", text: "正文".repeat(80) });
+    const articleSnapshot = chooseFeedlySnapshot([{ ...opened, articleCandidate: opened.candidate, listItems: list }]);
+    expect(articleSnapshot?.articleCandidate?.title).toBe("已打开正文");
+  });
+
+  it("formats every list item in DOM order", () => {
+    vi.stubGlobal("DOMParser", class {
+      parseFromString() {
+        return { querySelectorAll: () => [], body: { innerHTML: "" } };
+      }
+    });
+    const result = formatFeedlyList("稍后阅读", [
+      listItem({ order: 0, title: "第一篇", html: "", text: "第一篇正文" }),
+      listItem({ order: 1, title: "第二篇", html: "", text: "第二篇正文" }),
+    ]);
+    expect(result.markdown).toContain("## 1. 第一篇");
+    expect(result.markdown).toContain("第一篇正文");
+    expect(result.markdown.indexOf("第一篇")).toBeLessThan(result.markdown.indexOf("第二篇"));
+    expect(result.html).toContain("data-feedly-list=\"true\"");
+    expect(result.html).toContain("第二篇正文");
   });
 });
 
