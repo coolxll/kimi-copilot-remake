@@ -3,8 +3,11 @@ import {
   fetchBilibiliSubtitleInBackground,
   isBilibiliSubtitleMessage,
 } from "../src/platform/chrome/bilibili";
+import { installWebSessionBackground } from "../src/integrations/web-session/background";
 
 export default defineBackground(() => {
+  installWebSessionBackground();
+
   browser.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     if (!isBilibiliSubtitleMessage(message)) return undefined;
     void fetchBilibiliSubtitleInBackground(message.request)

@@ -1,10 +1,6 @@
 import { AppError } from "../../domain/errors";
 
-/**
- * Short-lived request parameters exposed by the signed-in Gemini Web page.
- * These are deliberately kept in memory for one request only; they are not a
- * substitute for, or a persistent copy of, the browser's login credentials.
- */
+/** Short-lived request parameters exposed by the signed-in Gemini Web page. */
 export interface GeminiWebContext {
   atValue: string;
   blValue: string;
@@ -16,6 +12,9 @@ export interface GeminiWebContext {
 export interface GeminiParsedLine {
   text: string;
   thoughts: string | null;
+  conversationId?: string;
+  responseId?: string;
+  choiceId?: string;
 }
 
 export const GEMINI_WEB_MODEL_HASH = "fbb127bbb056c959";
@@ -28,7 +27,6 @@ export function extractGeminiWebContext(html: string, requestedUser = "0"): Gemi
   if (!atValue || !blValue || !fSid) {
     throw new AppError("api-contract", "Gemini Web 请求参数缺失，页面协议可能已变化", { retryable: true });
   }
-
   const locale = html.match(/<html[^>]*\slang="([^"]+)"/)?.[1] || "en-US";
   const authUser = html.match(/data-index="(\d+)"/)?.[1] || requestedUser || "0";
   return { atValue, blValue, fSid, locale, authUser };
@@ -68,14 +66,28 @@ export function buildGeminiWebRequest(prompt: string, context: GeminiWebContext)
   };
   if (context.authUser && context.authUser !== "0") headers["X-Goog-AuthUser"] = context.authUser;
 
-  const body = new URLSearchParams({ at: context.atValue, "f.req": fReq });
   return {
     url: `https://gemini.google.com${accountPrefix}/_/BardChatUi/data/assistant.lamda.BardFrontendService/StreamGenerate?${query.toString()}`,
-    init: { method: "POST", headers, credentials: "include", body },
+    init: {
+      method: "POST",
+      headers,
+      credentials: "include",
+      body: new URLSearchParams({ at: context.atValue, "f.req": fReq }),
+    },
   };
 }
 
 export async function completeGeminiWebRpc(prompt: string, signal: AbortSignal): Promise<string> {
+  let latest = "";
+  await streamGeminiWebRpc(prompt, signal, ({ text }) => { latest = text; });
+  return latest.trim();
+}
+
+export async function streamGeminiWebRpc(
+  prompt: string,
+  signal: AbortSignal,
+  onUpdate: (update: GeminiParsedLine) => void,
+): Promise<{ conversationId?: string }> {
   const context = await fetchGeminiWebContext(signal);
   const request = buildGeminiWebRequest(prompt, context);
   const response = await fetch(request.url, { ...request.init, signal });
@@ -85,7 +97,7 @@ export async function completeGeminiWebRpc(prompt: string, signal: AbortSignal):
   if (!response.ok) {
     throw new AppError("api-unavailable", `Gemini Web 请求失败（HTTP ${response.status}）`, { retryable: true });
   }
-  return readGeminiWebResponse(response);
+  return readGeminiWebResponseWithUpdates(response, signal, onUpdate);
 }
 
 export async function fetchGeminiWebContext(signal: AbortSignal): Promise<GeminiWebContext> {
@@ -102,51 +114,79 @@ export async function fetchGeminiWebContext(signal: AbortSignal): Promise<Gemini
     throw new AppError("api-unavailable", `无法读取 Gemini Web 页面（HTTP ${response.status}）`, { retryable: true });
   }
   const html = await response.text();
-  if (looksLikeGeminiLoginPage(html)) {
+  if (looksLikeGeminiLoginPage(html) && !hasGeminiWebContext(html)) {
     throw new AppError("auth-required", "Gemini Web 当前未登录，请先登录 Gemini", { retryable: true });
   }
   return extractGeminiWebContext(html);
 }
 
 export async function readGeminiWebResponse(response: Response): Promise<string> {
+  let latest = "";
+  await readGeminiWebResponseWithUpdates(response, undefined, ({ text }) => { latest = text; });
+  return latest.trim();
+}
+
+async function readGeminiWebResponseWithUpdates(
+  response: Response,
+  signal: AbortSignal | undefined,
+  onUpdate: (update: GeminiParsedLine) => void,
+): Promise<{ conversationId?: string }> {
   if (!response.body) throw new AppError("api-contract", "Gemini Web 返回了空响应流", { retryable: true });
   const reader = response.body.getReader();
   const decoder = new TextDecoder("utf-8");
   let buffer = "";
   let latestText = "";
+  let conversationId: string | undefined;
   let firstChunk = true;
 
-  while (true) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    const chunk = decoder.decode(value, { stream: true });
-    if (firstChunk) {
-      firstChunk = false;
-      if (looksLikeGeminiLoginPage(chunk)) {
-        throw new AppError("auth-required", "Gemini Web 当前未登录，请先登录 Gemini", { retryable: true });
+  try {
+    while (true) {
+      if (signal?.aborted) throw signal.reason ?? new DOMException("Aborted", "AbortError");
+      const { done, value } = await reader.read();
+      if (done) break;
+      const chunk = decoder.decode(value, { stream: true });
+      if (firstChunk) {
+        firstChunk = false;
+        if (looksLikeGeminiLoginPage(chunk)) {
+          throw new AppError("auth-required", "Gemini Web 当前未登录，请先登录 Gemini", { retryable: true });
+        }
+      }
+      buffer += chunk;
+      let newlineIndex = buffer.indexOf("\n");
+      while (newlineIndex !== -1) {
+        const line = buffer.slice(0, newlineIndex);
+        buffer = buffer.slice(newlineIndex + 1);
+        const parsed = parseGeminiLine(line);
+        if (parsed) {
+          if (parsed.text) {
+            latestText = mergeGeminiText(latestText, parsed.text);
+            onUpdate({ ...parsed, text: latestText });
+          }
+          conversationId = parsed.conversationId || conversationId;
+        }
+        newlineIndex = buffer.indexOf("\n");
       }
     }
-    buffer += chunk;
-    let newlineIndex = buffer.indexOf("\n");
-    while (newlineIndex !== -1) {
-      const line = buffer.slice(0, newlineIndex);
-      buffer = buffer.slice(newlineIndex + 1);
-      const parsed = parseGeminiLine(line);
-      if (parsed?.text) latestText = parsed.text;
-      newlineIndex = buffer.indexOf("\n");
+    buffer += decoder.decode();
+    const trailing = parseGeminiLine(buffer);
+    if (trailing) {
+      if (trailing.text) {
+        latestText = mergeGeminiText(latestText, trailing.text);
+        onUpdate({ ...trailing, text: latestText });
+      }
+      conversationId = trailing.conversationId || conversationId;
     }
+  } finally {
+    reader.releaseLock();
   }
 
-  buffer += decoder.decode();
-  const trailing = parseGeminiLine(buffer);
-  if (trailing?.text) latestText = trailing.text;
   if (!latestText.trim()) {
     if (looksLikeGeminiLoginPage(buffer)) {
       throw new AppError("auth-required", "Gemini Web 当前未登录，请先登录 Gemini", { retryable: true });
     }
     throw new AppError("api-contract", "Gemini Web 响应为空或格式暂不支持", { retryable: true });
   }
-  return latestText.trim();
+  return { conversationId };
 }
 
 export function parseGeminiLine(line: string): GeminiParsedLine | null {
@@ -160,15 +200,29 @@ export function parseGeminiLine(line: string): GeminiParsedLine | null {
       if (!Array.isArray(envelopeEntry) || typeof envelopeEntry[2] !== "string") continue;
       const payload = JSON.parse(envelopeEntry[2]) as unknown;
       if (!Array.isArray(payload) || !Array.isArray(payload[4])) continue;
-      const candidate = payload[4][0];
-      if (!Array.isArray(candidate)) continue;
+      const candidate = (payload[4] as unknown[]).find((entry): entry is unknown[] => Array.isArray(entry) && typeof entry[1] !== "undefined");
+      if (!candidate) continue;
       const textNode = candidate[1];
-      const text = Array.isArray(textNode) && typeof textNode[0] === "string" ? textNode[0] : "";
+      const text = Array.isArray(textNode)
+        ? textNode.filter((part): part is string => typeof part === "string").join("")
+        : typeof textNode === "string" ? textNode : "";
       const thoughtNode = candidate[37];
       const thoughts = Array.isArray(thoughtNode) && Array.isArray(thoughtNode[0]) && typeof thoughtNode[0][0] === "string"
         ? thoughtNode[0][0]
         : null;
-      if (text || thoughts) return { text, thoughts };
+      const ids = Array.isArray(payload[1]) ? payload[1] : [];
+      const conversationId = typeof ids[0] === "string" ? ids[0] : undefined;
+      const responseId = typeof ids[1] === "string" ? ids[1] : undefined;
+      const choiceId = typeof candidate[0] === "string" ? candidate[0] : undefined;
+      if (text || thoughts) {
+        return {
+          text,
+          thoughts,
+          ...(conversationId ? { conversationId } : {}),
+          ...(responseId ? { responseId } : {}),
+          ...(choiceId ? { choiceId } : {}),
+        };
+      }
     }
   } catch {
     // Gemini occasionally emits metadata lines that are not chat payloads.
@@ -178,6 +232,17 @@ export function parseGeminiLine(line: string): GeminiParsedLine | null {
 
 function extractFromHtml(variableName: string, html: string): string | undefined {
   return new RegExp(`"${variableName}":"([^"]+)"`).exec(html)?.[1];
+}
+
+function hasGeminiWebContext(html: string): boolean {
+  return Boolean(extractFromHtml("SNlM0e", html) && extractFromHtml("cfb2h", html) && extractFromHtml("FdrFJe", html));
+}
+
+function mergeGeminiText(previous: string, next: string): string {
+  if (!previous) return next;
+  if (next.startsWith(previous)) return next;
+  if (previous.endsWith(next)) return previous;
+  return `${previous}${next}`;
 }
 
 function generateRequestId(): string {
@@ -191,5 +256,6 @@ function generateRequestId(): string {
 
 function looksLikeGeminiLoginPage(value: string): boolean {
   const lower = value.toLowerCase();
-  return lower.includes("accounts.google.com") && (lower.includes("sign in") || lower.includes("identifier"));
+  return (lower.includes("servicelogin") || lower.includes("identifier"))
+    && (lower.includes("sign in") || lower.includes("signin") || lower.includes("登录"));
 }

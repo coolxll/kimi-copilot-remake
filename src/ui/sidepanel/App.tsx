@@ -86,8 +86,8 @@ export function SidePanelApp() {
       setLoginNotice(undefined);
       if (isWebSessionProvider(provider)) {
         await services.webSessions.openLogin(provider);
-        setLoginNotice(`已打开 ${PROVIDER_LABELS[provider]} 页面。登录完成后回到这里点击“重新总结”。`);
-        dispatch({ type: "reset" });
+        setLoginNotice(`${PROVIDER_LABELS[provider]} 登录态已更新，正在重新总结。`);
+        if (tabId) await start(provider, undefined, tabId);
         return;
       }
       await services.auth.openLoginAndWait();
@@ -131,13 +131,15 @@ export function SidePanelApp() {
       <div className="actions">
         <div className="action-group">
           <IconButton icon="copy" label="复制总结" onClick={copy} />
-          {state.externalUrl && <a className="button" href={state.externalUrl} target="_blank" rel="noreferrer">去 Kimi 继续对话</a>}
+          {state.externalUrl && <a className="button" href={state.externalUrl} target="_blank" rel="noreferrer">去 {PROVIDER_LABELS[state.provider]} 继续对话</a>}
         </div>
         <IconButton icon="refresh" label="重新总结" onClick={() => void start(provider)} />
       </div>
     </section>}
     {state.status === "error" && <section className="card">
       <div className="error">{state.error.message}</div>
+      {state.markdown && <Markdown content={state.markdown} />}
+      {state.warnings?.map((warning) => <div className="warning" key={warning}>{warning}</div>)}
       <div className="actions"><button className="button primary" onClick={() => void start(provider)} disabled={!state.canRetry}>重试</button><button className="button" onClick={openOptions}>打开选项</button></div>
     </section>}
     {state.status === "idle" && <section className="card"><p className="current-provider">当前后端：<ProviderBadge providerId={provider} />。</p><button className="button primary provider-button" onClick={() => void start(provider)}><ProviderIcon providerId={provider} />使用此后端重新总结</button></section>}

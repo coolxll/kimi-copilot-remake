@@ -60,6 +60,7 @@ function dispatchEvent(event: SummaryEvent, dispatch: (action: TaskAction) => vo
   switch (event.type) {
     case "phase": dispatch({ type: "phase", phase: event.phase, current: event.current, total: event.total }); break;
     case "delta": dispatch({ type: "delta", text: event.text }); break;
+    case "snapshot": dispatch({ type: "snapshot", text: event.text }); break;
     case "warning": dispatch({ type: "warning", message: event.message }); break;
     case "done": dispatch({ type: "done", externalUrl: event.externalUrl }); break;
   }

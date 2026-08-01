@@ -32,9 +32,10 @@ export class WebSessionProvider implements SummaryProvider {
 
 YouTube 视频标题：${request.document.title}
 YouTube 视频链接：${request.document.sourceUrl}`;
-      const output = await this.client.complete(this.id, prompt, signal);
-      yield { type: "delta", text: output };
-      yield { type: "done" };
+      for await (const event of this.client.stream(this.id, prompt, signal)) {
+        if (event.type === "snapshot") yield { type: "snapshot", text: event.text };
+        else yield { type: "done", externalUrl: event.externalUrl };
+      }
       return;
     }
 
@@ -46,8 +47,9 @@ YouTube 视频链接：${request.document.sourceUrl}`;
 
     yield { type: "phase", phase: "summarizing", current: 1, total: 1 };
     const prompt = `${request.prompt}\n\n请基于以下页面内容完成总结。保留事实、结构和关键细节，不要提及“页面内容”或本次提取过程。\n\n标题：${request.document.title}\n来源：${request.document.sourceUrl}\n\n正文：\n${limited.text}`;
-    const output = await this.client.complete(this.id, prompt, signal);
-    yield { type: "delta", text: output };
-    yield { type: "done" };
+    for await (const event of this.client.stream(this.id, prompt, signal)) {
+      if (event.type === "snapshot") yield { type: "snapshot", text: event.text };
+      else yield { type: "done", externalUrl: event.externalUrl };
+    }
   }
 }

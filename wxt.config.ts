@@ -8,6 +8,9 @@ export default defineConfig({
     version: "0.1.0",
     minimum_chrome_version: "140",
     permissions: ["activeTab", "scripting", "sidePanel", "storage", "notifications"],
+    content_security_policy: {
+      extension_pages: "script-src 'self' 'wasm-unsafe-eval'; object-src 'self'",
+    },
     host_permissions: [
       "https://*.kimi.com/*",
       "https://*.volces.com/*",

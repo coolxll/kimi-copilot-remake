@@ -134,10 +134,16 @@ export function OptionsApp() {
     try {
       await services.webSessions.openLogin(providerId);
       void refreshWebSessionStatuses(providerId);
-      setNotice({ kind: "success", text: `已打开 ${PROVIDER_LABELS[providerId]} 页面。扩展不会读取或保存 Cookie，登录完成后即可在侧边栏选择它总结。` });
+      setNotice({ kind: "success", text: `${PROVIDER_LABELS[providerId]} 登录态已保存，正常总结时使用后台 Web 协议。` });
     } catch (error) {
       setNotice({ kind: "error", text: toAppError(error).message });
     }
+  };
+
+  const clearWebSession = async (providerId: WebSessionProviderId) => {
+    await services.storage.clearWebSessionCredential(providerId);
+    setWebStatuses((current) => ({ ...current, [providerId]: "no-page" }));
+    setNotice({ kind: "success", text: `${PROVIDER_LABELS[providerId]} 登录态已清除` });
   };
 
   const openExtractorTest = () => void browser.tabs.create({ url: browser.runtime.getURL("/") + "youtube-test.html" });
@@ -161,11 +167,11 @@ export function OptionsApp() {
     </section>
     <section className="card">
       <h2>网页会话后端</h2>
-      <p className="muted">复用对应网站已有登录态，不申请 cookies 权限，不把站点 Cookie 或 Token 保存到扩展。ChatGPT 优先使用页面侧 Web API，失败后回退 DOM；DeepSeek 使用页面 DOM；Gemini 优先使用 Web RPC，失败后回退页面 DOM。内部协议或网页结构变化可能影响读取。</p>
+      <p className="muted">登录时打开对应网站采集可复用凭据并保存在本机扩展存储；正常总结走后台 Web 协议，不向网页输入提示词，也不申请 cookies 读取权限。内部 Web 协议变化可能影响读取。</p>
       <div className="actions">{WEB_SESSION_PROVIDER_IDS.map((providerId) => {
         const status = webStatuses[providerId];
         const isChecking = checkingWebStatus === "all" || checkingWebStatus === providerId;
-        return <span key={providerId} className="web-session-action-group"><span className="web-session-provider"><ProviderBadge providerId={providerId} /><span className={webSessionStatusClass(status)}>{isChecking ? "检测中…" : WEB_SESSION_STATUS_LABELS[status]}</span></span><button className="button provider-button" onClick={() => void openWebSession(providerId)}><ProviderIcon providerId={providerId} />{`登录 ${PROVIDER_LABELS[providerId]}`}</button><button className="button" disabled={isChecking} onClick={() => void refreshWebSessionStatuses(providerId)}>检测</button></span>;
+        return <span key={providerId} className="web-session-action-group"><span className="web-session-provider"><ProviderBadge providerId={providerId} /><span className={webSessionStatusClass(status)}>{isChecking ? "检测中…" : WEB_SESSION_STATUS_LABELS[status]}</span></span><button className="button provider-button" onClick={() => void openWebSession(providerId)}><ProviderIcon providerId={providerId} />{status === "logged-in" ? `更新 ${PROVIDER_LABELS[providerId]}` : `登录 ${PROVIDER_LABELS[providerId]}`}</button><button className="button" disabled={isChecking} onClick={() => void refreshWebSessionStatuses(providerId)}>检测</button>{status === "logged-in" && <button className="button danger" onClick={() => void clearWebSession(providerId)}>清除</button>}</span>;
       })}</div>
     </section>
     <section className="card">

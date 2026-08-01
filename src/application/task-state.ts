@@ -7,12 +7,13 @@ export type TaskState =
   | { status: "success"; provider: ProviderId; markdown: string; warnings: string[]; externalUrl?: string }
   | { status: "auth-required"; provider: ProviderId; message: string }
   | { status: "provider-not-configured"; provider: ProviderId; message: string }
-  | { status: "error"; provider: ProviderId; error: AppError; canRetry: boolean };
+  | { status: "error"; provider: ProviderId; error: AppError; canRetry: boolean; markdown?: string; warnings?: string[] };
 
 export type TaskAction =
   | { type: "start"; provider: ProviderId }
   | { type: "phase"; phase: string; current?: number; total?: number }
   | { type: "delta"; text: string }
+  | { type: "snapshot"; text: string }
   | { type: "warning"; message: string }
   | { type: "done"; externalUrl?: string }
   | { type: "auth-required"; message: string }
@@ -32,6 +33,8 @@ export function taskReducer(state: TaskState, action: TaskAction): TaskState {
       return state.status === "loading" ? { ...state, phase: phaseLabel(action.phase), current: action.current, total: action.total } : state;
     case "delta":
       return state.status === "loading" ? { ...state, markdown: state.markdown + action.text } : state;
+    case "snapshot":
+      return state.status === "loading" ? { ...state, markdown: action.text } : state;
     case "warning":
       return state.status === "loading" ? { ...state, warnings: [...state.warnings, action.message] } : state;
     case "done":
@@ -43,7 +46,13 @@ export function taskReducer(state: TaskState, action: TaskAction): TaskState {
     case "provider-not-configured":
       return { status: "provider-not-configured", provider: state.status === "idle" ? "openai-compatible" : state.provider, message: action.message };
     case "error":
-      return { status: "error", provider: state.status === "idle" ? "kimi-web" : state.provider, error: action.error, canRetry: action.error.retryable };
+      return {
+        status: "error",
+        provider: state.status === "idle" ? "kimi-web" : state.provider,
+        error: action.error,
+        canRetry: action.error.retryable,
+        ...(state.status === "loading" && state.markdown ? { markdown: state.markdown, warnings: state.warnings } : {}),
+      };
     case "reset":
       return initialTaskState();
   }

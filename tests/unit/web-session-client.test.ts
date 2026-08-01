@@ -10,15 +10,37 @@ const browserMock = vi.hoisted(() => ({
     get: vi.fn(),
     create: vi.fn(),
     update: vi.fn(),
+    remove: vi.fn(),
   },
   scripting: {
     executeScript: vi.fn(),
+  },
+  runtime: {
+    connect: vi.fn(),
   },
 }));
 
 vi.mock("wxt/browser", () => ({ browser: browserMock }));
 
 import { WebSessionClient } from "../../src/integrations/web-session/client";
+import type { SettingsRepository } from "../../src/platform/chrome/storage";
+
+function makeStorage(overrides: Partial<SettingsRepository> = {}): SettingsRepository {
+  return {
+    getSettings: vi.fn(),
+    saveSettings: vi.fn(),
+    getOpenAISecret: vi.fn(),
+    saveOpenAISecret: vi.fn(),
+    clearOpenAISecret: vi.fn(),
+    getKimiTokens: vi.fn(),
+    saveKimiTokens: vi.fn(),
+    clearKimiTokens: vi.fn(),
+    getWebSessionCredential: vi.fn(async () => ({ providerId: "chatgpt-web" as const, accessToken: "saved-token", capturedAt: Date.now() })),
+    saveWebSessionCredential: vi.fn(),
+    clearWebSessionCredential: vi.fn(),
+    ...overrides,
+  };
+}
 
 describe("WebSessionClient", () => {
   afterEach(() => {
@@ -26,80 +48,60 @@ describe("WebSessionClient", () => {
     vi.unstubAllGlobals();
   });
 
-  it("reuses an already-open provider tab and lets the page own authentication", async () => {
-    const tab = { id: 77, url: "https://chatgpt.com/c/existing", status: "complete", active: true };
+  it("requires a saved credential before opening a background stream", async () => {
     browserMock.permissions.contains.mockResolvedValue(true);
-    browserMock.tabs.query.mockResolvedValue([tab]);
-    browserMock.tabs.get.mockResolvedValue(tab);
-    browserMock.scripting.executeScript
-      .mockResolvedValueOnce([{ result: { status: "ok", text: "ChatGPT Web API 总结" } }]);
+    const storage = makeStorage({ getWebSessionCredential: vi.fn(async () => null) });
+    const client = new WebSessionClient(storage);
 
-    const result = await new WebSessionClient().complete("chatgpt-web", "请总结", new AbortController().signal);
-
-    expect(result).toBe("ChatGPT Web API 总结");
-    expect(browserMock.tabs.query).toHaveBeenCalledWith({});
-    expect(browserMock.tabs.create).not.toHaveBeenCalled();
-    expect(browserMock.scripting.executeScript).toHaveBeenCalledTimes(1);
-    expect(browserMock.scripting.executeScript).toHaveBeenCalledWith(expect.objectContaining({
-      target: { tabId: 77 },
-      world: "MAIN",
-      args: ["请总结"],
-    }));
+    const iterator = client.stream("chatgpt-web", "请总结", new AbortController().signal)[Symbol.asyncIterator]();
+    await expect(iterator.next())
+      .rejects.toMatchObject({ code: "auth-required" });
+    expect(browserMock.runtime.connect).not.toHaveBeenCalled();
   });
 
-  it("falls back to the ChatGPT page DOM when its Web API path is unavailable", async () => {
-    const tab = { id: 78, url: "https://chatgpt.com/", status: "complete", active: true };
+  it("replaces streamed snapshots and returns the provider continuation URL", async () => {
     browserMock.permissions.contains.mockResolvedValue(true);
-    browserMock.tabs.query.mockResolvedValue([tab]);
-    browserMock.tabs.get.mockResolvedValue(tab);
-    browserMock.scripting.executeScript
-      .mockResolvedValueOnce([{ result: { status: "failed", message: "安全校验未通过" } }])
-      .mockResolvedValueOnce([{ result: { status: "ok", text: "页面 DOM 总结" } }]);
+    const listeners: Array<(message: unknown) => void> = [];
+    const disconnectListeners: Array<() => void> = [];
+    const port = {
+      onMessage: { addListener: (listener: (message: unknown) => void) => listeners.push(listener) },
+      onDisconnect: { addListener: (listener: () => void) => disconnectListeners.push(listener) },
+      postMessage: vi.fn((message: { type: string; requestId?: string }) => {
+        if (message.type !== "start" || !message.requestId) return;
+        listeners.forEach((listener) => listener({ type: "snapshot", requestId: message.requestId, text: "# 标题" }));
+        listeners.forEach((listener) => listener({ type: "snapshot", requestId: message.requestId, text: "# 标题\n\n正文" }));
+        listeners.forEach((listener) => listener({ type: "done", requestId: message.requestId, externalUrl: "https://chatgpt.com/c/conversation-1" }));
+      }),
+      disconnect: vi.fn(),
+    };
+    browserMock.runtime.connect.mockReturnValue(port);
+    const events = [];
+    for await (const event of new WebSessionClient(makeStorage()).stream("chatgpt-web", "请总结", new AbortController().signal)) events.push(event);
 
-    await expect(new WebSessionClient().complete("chatgpt-web", "请总结", new AbortController().signal)).resolves.toBe("页面 DOM 总结");
-    expect(browserMock.scripting.executeScript).toHaveBeenLastCalledWith(expect.objectContaining({
-      target: { tabId: 78 },
-      world: "MAIN",
-      args: ["chatgpt-web", "请总结"],
-    }));
+    expect(events).toEqual([
+      { type: "snapshot", text: "# 标题" },
+      { type: "snapshot", text: "# 标题\n\n正文" },
+      { type: "done", externalUrl: "https://chatgpt.com/c/conversation-1" },
+    ]);
+    expect(port.disconnect).toHaveBeenCalledOnce();
+    expect(disconnectListeners).toHaveLength(1);
   });
 
-  it("falls back to the Gemini page when the reverse Web RPC is unavailable", async () => {
-    const tab = { id: 88, url: "https://gemini.google.com/app", status: "complete", active: true };
+  it("opens a new login tab, captures the page credential, saves it, and closes only that tab", async () => {
     browserMock.permissions.contains.mockResolvedValue(true);
-    browserMock.tabs.query.mockResolvedValue([tab]);
-    browserMock.tabs.get.mockResolvedValue(tab);
-    vi.stubGlobal("fetch", vi.fn().mockRejectedValue(new Error("protocol drift")));
-    browserMock.scripting.executeScript.mockResolvedValue([{ result: { status: "ok", text: "页面兜底总结" } }]);
+    browserMock.tabs.query.mockResolvedValue([]);
+    browserMock.tabs.create.mockResolvedValue({ id: 77, url: "https://chatgpt.com/", status: "complete" });
+    browserMock.tabs.get.mockResolvedValue({ id: 77, url: "https://chatgpt.com/", status: "complete" });
+    browserMock.tabs.remove.mockResolvedValue(undefined);
+    browserMock.scripting.executeScript.mockResolvedValue([{ result: {
+      status: "ok",
+      credential: { providerId: "chatgpt-web", accessToken: "new-token", capturedAt: 1 },
+    } }]);
+    const storage = makeStorage();
 
-    await expect(new WebSessionClient().complete("gemini-web", "请总结", new AbortController().signal)).resolves.toBe("页面兜底总结");
-    expect(browserMock.scripting.executeScript).toHaveBeenCalledWith(expect.objectContaining({
-      target: { tabId: 88 },
-      world: "MAIN",
-      args: ["gemini-web", "请总结"],
-    }));
-  });
+    await new WebSessionClient(storage).openLogin("chatgpt-web");
 
-  it("detects an existing provider page as logged in using read-only DOM execution", async () => {
-    const tab = { id: 99, url: "https://gemini.google.com/app", status: "complete", active: true };
-    browserMock.permissions.contains.mockResolvedValue(true);
-    browserMock.tabs.query.mockResolvedValue([tab]);
-    browserMock.scripting.executeScript.mockResolvedValue([{ result: { status: "logged-in" } }]);
-
-    await expect(new WebSessionClient().detectLoginStatus("gemini-web")).resolves.toBe("logged-in");
-    expect(browserMock.tabs.create).not.toHaveBeenCalled();
-    expect(browserMock.scripting.executeScript).toHaveBeenCalledWith(expect.objectContaining({
-      target: { tabId: 99 },
-      world: "MAIN",
-      args: ["gemini-web"],
-    }));
-  });
-
-  it("reports missing permission without opening a page or reading credentials", async () => {
-    browserMock.permissions.contains.mockResolvedValue(false);
-
-    await expect(new WebSessionClient().detectLoginStatus("chatgpt-web")).resolves.toBe("permission-required");
-    expect(browserMock.tabs.query).not.toHaveBeenCalled();
-    expect(browserMock.scripting.executeScript).not.toHaveBeenCalled();
+    expect(storage.saveWebSessionCredential).toHaveBeenCalledWith(expect.objectContaining({ accessToken: "new-token" }));
+    expect(browserMock.tabs.remove).toHaveBeenCalledWith(77);
   });
 });

@@ -1,4 +1,22 @@
 export type WebSessionProviderId = "chatgpt-web" | "gemini-web" | "deepseek-web";
+
+export type WebSessionCredential =
+  | {
+      providerId: "chatgpt-web";
+      accessToken: string;
+      capturedAt: number;
+      expiresAt?: number;
+    }
+  | {
+      providerId: "gemini-web";
+      authUser: string;
+      capturedAt: number;
+    }
+  | {
+      providerId: "deepseek-web";
+      userToken: string;
+      capturedAt: number;
+    };
 export type ProviderId = "kimi-web" | WebSessionProviderId | "openai-compatible";
 
 export const PROVIDER_LABELS: Record<ProviderId, string> = {
@@ -41,6 +59,7 @@ export type SummaryEvent =
       total?: number;
     }
   | { type: "delta"; text: string }
+  | { type: "snapshot"; text: string }
   | { type: "warning"; message: string }
   | { type: "done"; externalUrl?: string };
 

@@ -16,9 +16,12 @@ describe("web session providers", () => {
     expect(isProviderId("not-a-provider")).toBe(false);
   });
 
-  it("passes extracted page text through the selected session adapter", async () => {
-    const complete = vi.fn(async (_providerId: string, _prompt: string, _signal: AbortSignal) => "session summary");
-    const client = { validateReady: vi.fn(async () => undefined), complete } as unknown as WebSessionClient;
+  it("passes extracted page text through the selected streaming session adapter", async () => {
+    const stream = vi.fn(async function* (_providerId: string, _prompt: string, _signal: AbortSignal) {
+      yield { type: "snapshot" as const, text: "session summary" };
+      yield { type: "done" as const, externalUrl: "https://chatgpt.com/c/conversation-1" };
+    });
+    const client = { validateReady: vi.fn(async () => undefined), stream } as unknown as WebSessionClient;
     const provider = new WebSessionProvider("chatgpt-web", client);
     const events = [];
     for await (const event of provider.summarize({
@@ -32,20 +35,23 @@ describe("web session providers", () => {
       prompt: "Summarize carefully",
     }, new AbortController().signal)) events.push(event);
 
-    expect(complete).toHaveBeenCalledOnce();
-    expect(complete.mock.calls[0]?.[0]).toBe("chatgpt-web");
-    expect(complete.mock.calls[0]?.[1]).toContain("Article body");
+    expect(stream).toHaveBeenCalledOnce();
+    expect(stream.mock.calls[0]?.[0]).toBe("chatgpt-web");
+    expect(stream.mock.calls[0]?.[1]).toContain("Article body");
     expect(events).toEqual([
       { type: "warning", message: "source warning" },
       { type: "phase", phase: "summarizing", current: 1, total: 1 },
-      { type: "delta", text: "session summary" },
-      { type: "done" },
+      { type: "snapshot", text: "session summary" },
+      { type: "done", externalUrl: "https://chatgpt.com/c/conversation-1" },
     ]);
   });
 
   it("lets Gemini handle YouTube URLs directly instead of requiring extracted subtitles", async () => {
-    const complete = vi.fn(async (_providerId: string, _prompt: string, _signal: AbortSignal) => "gemini video summary");
-    const client = { validateReady: vi.fn(async () => undefined), complete } as unknown as WebSessionClient;
+    const stream = vi.fn(async function* (_providerId: string, _prompt: string, _signal: AbortSignal) {
+      yield { type: "snapshot" as const, text: "gemini video summary" };
+      yield { type: "done" as const, externalUrl: "https://gemini.google.com/app/conversation-1" };
+    });
+    const client = { validateReady: vi.fn(async () => undefined), stream } as unknown as WebSessionClient;
     const provider = new WebSessionProvider("gemini-web", client);
     const events = [];
     for await (const event of provider.summarize({
@@ -59,13 +65,13 @@ describe("web session providers", () => {
       prompt: "请写详细笔记",
     }, new AbortController().signal)) events.push(event);
 
-    expect(complete.mock.calls[0]?.[1]).toContain("https://www.youtube.com/watch?v=video-id");
-    expect(complete.mock.calls[0]?.[1]).not.toContain("扩展字幕提取失败");
+    expect(stream.mock.calls[0]?.[1]).toContain("https://www.youtube.com/watch?v=video-id");
+    expect(stream.mock.calls[0]?.[1]).not.toContain("扩展字幕提取失败");
     expect(events).toEqual([
       { type: "warning", message: "Gemini Web 将直接读取 YouTube 链接，不依赖扩展字幕提取" },
       { type: "phase", phase: "summarizing", current: 1, total: 1 },
-      { type: "delta", text: "gemini video summary" },
-      { type: "done" },
+      { type: "snapshot", text: "gemini video summary" },
+      { type: "done", externalUrl: "https://gemini.google.com/app/conversation-1" },
     ]);
   });
 });

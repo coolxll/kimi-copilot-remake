@@ -16,6 +16,10 @@ function buildGeminiLine(text: string): string {
   return `)]}'${JSON.stringify([["wrb.fr", null, JSON.stringify(payload)]])}\n`;
 }
 
+function buildGeminiStream(...texts: string[]): string {
+  return texts.map((text) => buildGeminiLine(text)).join("");
+}
+
 function streamFrom(text: string): ReadableStream<Uint8Array> {
   return new ReadableStream({
     start(controller) {
@@ -61,7 +65,13 @@ describe("Gemini Web RPC", () => {
   });
 
   it("parses the prefixed Gemini RPC response line", () => {
-    expect(parseGeminiLine(buildGeminiLine("PROJECT_OK"))).toEqual({ text: "PROJECT_OK", thoughts: null });
+    expect(parseGeminiLine(buildGeminiLine("PROJECT_OK"))).toEqual({
+      text: "PROJECT_OK",
+      thoughts: null,
+      conversationId: "conversation-1",
+      responseId: "response-1",
+      choiceId: "choice-1",
+    });
   });
 
   it("refreshes page parameters and reads the streamed answer", async () => {
@@ -74,7 +84,7 @@ describe("Gemini Web RPC", () => {
       .mockResolvedValueOnce({
         ok: true,
         status: 200,
-        body: streamFrom(buildGeminiLine("PROJECT_OK")),
+        body: streamFrom(buildGeminiStream("PROJECT", "PROJECT_OK")),
       });
     vi.stubGlobal("fetch", fetchMock);
 

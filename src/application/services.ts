@@ -21,7 +21,7 @@ export interface AppServices {
 export function createAppServices(): AppServices {
   const storage = createSettingsRepository();
   const auth = new KimiAuthService(storage);
-  const webSessions = new WebSessionClient();
+  const webSessions = new WebSessionClient(storage);
   const extractors = createExtractorRegistry();
   return {
     storage,
