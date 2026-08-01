@@ -15,6 +15,10 @@ export default defineConfig({
       // permission is needed: the background fetch uses the browser session.
       "https://api.bilibili.com/*",
       "https://*.hdslb.com/*",
+      // Feedly's entry API is used only as a fallback when the reader DOM has
+      // only rendered a summary or a shell around the current article.
+      "https://feedly.com/*",
+      "https://cloud.feedly.com/*",
     ],
     optional_host_permissions: [
       "https://*/*",
