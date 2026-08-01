@@ -118,24 +118,21 @@ export async function fetchBilibiliSubtitleInBackground(
 
   const pages = Array.isArray(viewData.pages) ? viewData.pages : [];
   const selectedPage = selectBilibiliPage(pages, videoRef.pageNumber, request.currentCid, viewData.cid);
-  const cid = selectedPage?.cid ?? viewData.cid;
-  const aid = viewData.aid ?? videoRef.aid;
-  const bvid = viewData.bvid ?? videoRef.bvid;
-  if (cid === undefined || (aid === undefined && bvid === undefined)) {
-    return unavailable({
-      title: viewData.title,
-      description: viewData.desc,
-      pageCount: pages.length,
-    }, "无法确定 Bilibili 当前分 P");
-  }
-
-  const partial: Partial<BilibiliSubtitleFetchResponse> = {
+  const pageMetadata: Partial<BilibiliSubtitleFetchResponse> = {
     title: viewData.title,
     description: viewData.desc,
     pageCount: pages.length,
     selectedPage: selectedPage?.page ?? (pages.length === 1 ? 1 : undefined),
     selectedPagePart: selectedPage?.part,
   };
+  const cid = selectedPage?.cid ?? (pages.length === 0 ? viewData.cid : undefined);
+  const aid = viewData.aid ?? videoRef.aid;
+  const bvid = viewData.bvid ?? videoRef.bvid;
+  if (cid === undefined || (aid === undefined && bvid === undefined)) {
+    return unavailable(pageMetadata, "无法确认 Bilibili 当前分 P，已拒绝使用不确定的字幕轨");
+  }
+
+  const partial = pageMetadata;
 
   let tracks: BilibiliSubtitleTrack[] = [];
   let identityMismatch = false;
@@ -147,7 +144,6 @@ export async function fetchBilibiliSubtitleInBackground(
 
   // Match BiliNote's working WBI path first, then retain the legacy endpoint
   // and numeric aid fallback for videos where only one form is accepted.
-  outer:
   for (let attempt = 0; attempt < 2 && tracks.length === 0; attempt += 1) {
     for (const endpoint of ["x/player/wbi/v2", "x/player/v2"]) {
       for (const identity of identities) {
@@ -160,27 +156,24 @@ export async function fetchBilibiliSubtitleInBackground(
         const player = playerResult.data;
         if (!playerResult.ok || player?.code !== 0 || !player.data) continue;
         const playerData = player.data;
-        if (
-          (bvid && playerData.bvid && playerData.bvid.toUpperCase() !== String(bvid).toUpperCase())
-          || (aid !== undefined && playerData.aid !== undefined && String(playerData.aid) !== String(aid))
-          || (playerData.cid !== undefined && String(playerData.cid) !== String(cid))
-        ) {
+        if (!isPlayerDataForVideo(playerData, { bvid, aid, cid })) {
           identityMismatch = true;
-          break outer;
+          continue;
         }
         const candidateTracks = Array.isArray(playerData.subtitle?.subtitles)
           ? playerData.subtitle.subtitles
           : [];
         if (candidateTracks.some((track) => Boolean(track.subtitle_url))) {
           tracks = candidateTracks;
-          break outer;
+          break;
         }
       }
+      if (tracks.length > 0) break;
     }
     if (tracks.length === 0 && attempt === 0) await delay(250);
   }
 
-  if (identityMismatch) return unavailable(partial, "Bilibili 字幕接口返回了不匹配的视频");
+  if (!tracks.length && identityMismatch) return unavailable(partial, "Bilibili 字幕接口返回了不匹配的视频");
 
   const selectedTrack = chooseBilibiliSubtitleTrack(tracks);
   if (!selectedTrack?.subtitle_url) {
@@ -257,6 +250,7 @@ async function getJson<T>(url: string, credentials: RequestCredentials): Promise
   try {
     const response = await fetch(url, {
       credentials,
+      cache: "no-store",
       headers: { Accept: "application/json" },
       referrer: "https://www.bilibili.com/",
     });
@@ -270,6 +264,16 @@ async function getJson<T>(url: string, credentials: RequestCredentials): Promise
   } catch {
     return { ok: false };
   }
+}
+
+function isPlayerDataForVideo(
+  playerData: PlayerData,
+  expected: { bvid?: string; aid?: number | string; cid: number | string },
+): boolean {
+  if (playerData.cid === undefined || String(playerData.cid) !== String(expected.cid)) return false;
+  if (expected.bvid && (!playerData.bvid || playerData.bvid.toUpperCase() !== String(expected.bvid).toUpperCase())) return false;
+  if (expected.aid !== undefined && (playerData.aid === undefined || String(playerData.aid) !== String(expected.aid))) return false;
+  return true;
 }
 
 function normalizeSubtitleUrl(rawUrl: string): string | undefined {

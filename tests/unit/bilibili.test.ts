@@ -37,7 +37,8 @@ describe("Bilibili URL and page selection", () => {
     ];
     expect(selectBilibiliPage(pages, 2, 101, 101)?.cid).toBe(202);
     expect(selectBilibiliPage(pages, undefined, 202, 101)?.cid).toBe(202);
-    expect(selectBilibiliPage(pages, undefined, undefined, 101)?.cid).toBe(101);
+    expect(selectBilibiliPage(pages, undefined, undefined, 101)).toBeUndefined();
+    expect(selectBilibiliPage([{ page: 1, cid: 101 }], undefined, undefined, 101)?.cid).toBe(101);
   });
 });
 
@@ -159,6 +160,35 @@ describe("Bilibili background subtitle fetch", () => {
     expect(result.subtitles).toBe("");
     expect(result.loginState).toBe("logged-out");
     expect(result.unavailableReason).toBe("B 站没有返回可下载字幕轨");
+  });
+
+  it("rejects subtitle data when the player response does not prove the requested video and cid", async () => {
+    const subtitleUrl = "https://aisubtitle.hdslb.com/unrelated.json";
+    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.includes("/x/web-interface/view")) {
+        return new Response(JSON.stringify({
+          code: 0,
+          data: { bvid: "BV1Test", aid: 123, cid: 101, pages: [{ page: 1, cid: 101 }] },
+        }), { status: 200 });
+      }
+      if (url.includes("/x/player/")) {
+        return new Response(JSON.stringify({
+          code: 0,
+          data: { subtitle: { subtitles: [{ lan: "zh-CN", subtitle_url: subtitleUrl }] } },
+        }), { status: 200 });
+      }
+      if (url.includes("/x/web-interface/nav")) {
+        return new Response(JSON.stringify({ code: 0, data: { isLogin: true } }), { status: 200 });
+      }
+      if (url === subtitleUrl) throw new Error("unrelated subtitle must not be fetched");
+      throw new Error(`unexpected URL: ${url}`);
+    }));
+
+    const result = await fetchBilibiliSubtitleInBackground({ videoRef: { bvid: "BV1Test" } });
+
+    expect(result.subtitles).toBe("");
+    expect(result.unavailableReason).toBe("Bilibili 字幕接口返回了不匹配的视频");
   });
 });
 

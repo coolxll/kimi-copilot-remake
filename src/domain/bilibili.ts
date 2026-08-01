@@ -44,7 +44,7 @@ export function parseBilibiliVideoUrl(rawUrl: string): BilibiliVideoRef | undefi
   return { bvid, aid, pageNumber };
 }
 
-/** Prefer an explicit P, then the page currently selected by the player. */
+/** Resolve a page only when the URL or current player state identifies it. */
 export function selectBilibiliPage(
   pages: BilibiliPage[],
   requestedPageNumber: number | undefined,
@@ -53,13 +53,14 @@ export function selectBilibiliPage(
 ): BilibiliPage | undefined {
   if (requestedPageNumber !== undefined) {
     const requested = pages.find((page) => Number(page.page) === requestedPageNumber);
-    if (requested) return requested;
+    return requested;
   }
   if (currentCid !== undefined && currentCid !== null) {
-    const current = pages.find((page) => String(page.cid) === String(currentCid));
-    if (current) return current;
+    return pages.find((page) => String(page.cid) === String(currentCid));
   }
-  return pages[0] ?? (fallbackCid !== undefined ? { cid: fallbackCid, page: requestedPageNumber } : undefined);
+  if (pages.length === 1) return pages[0];
+  if (pages.length > 1) return undefined;
+  return fallbackCid !== undefined ? { cid: fallbackCid, page: requestedPageNumber } : undefined;
 }
 
 export function chooseBilibiliSubtitleTrack(tracks: BilibiliSubtitleTrack[]): BilibiliSubtitleTrack | undefined {

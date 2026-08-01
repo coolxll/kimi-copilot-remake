@@ -64,10 +64,22 @@ export class BilibiliExtractor implements ContentExtractor {
           const state = (window as unknown as { __INITIAL_STATE__?: InitialState }).__INITIAL_STATE__;
           const normalize = (value: string): string => value.replace(/\s+/g, " ").trim();
           const description = normalize(document.querySelector("meta[name='description']")?.getAttribute("content") ?? "");
-          const pageText = [
-            ...["#viewbox_report", ".video-desc", ".basic-desc-info", ".bpx-player-subtitle-panel", ".bpx-player-subtitle-wrap"]
-              .map((selector) => document.querySelector(selector)?.textContent ?? ""),
-          ].map(normalize).filter(Boolean).join("\n\n");
+          // Do not treat the player's rendered subtitle layer as page text. It
+          // can survive a Bilibili SPA navigation and belong to the previous
+          // video even when the current video has no subtitle track. Clone
+          // containers first because #viewbox_report may contain the player.
+          const extractPageText = (selector: string): string => {
+            const node = document.querySelector(selector);
+            if (!node) return "";
+            const clone = node.cloneNode(true) as Element;
+            clone.querySelectorAll(".bpx-player-subtitle-panel, .bpx-player-subtitle-wrap").forEach((element) => element.remove());
+            return clone.textContent ?? "";
+          };
+          const pageText = ["#viewbox_report", ".video-desc", ".basic-desc-info"]
+            .map(extractPageText)
+            .map(normalize)
+            .filter(Boolean)
+            .join("\n\n");
 
           const commentRoot = document.querySelector("#comment, #commentapp, .comment-container");
           const commentSelectors = [
