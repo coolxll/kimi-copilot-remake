@@ -1,4 +1,21 @@
-export type ProviderId = "kimi-web" | "openai-compatible";
+export type WebSessionProviderId = "chatgpt-web" | "gemini-web" | "deepseek-web";
+export type ProviderId = "kimi-web" | WebSessionProviderId | "openai-compatible";
+
+export const PROVIDER_LABELS: Record<ProviderId, string> = {
+  "kimi-web": "Kimi Web",
+  "chatgpt-web": "ChatGPT Web",
+  "gemini-web": "Gemini Web",
+  "deepseek-web": "DeepSeek Web",
+  "openai-compatible": "OpenAI Compatible",
+};
+
+export function isWebSessionProvider(providerId: ProviderId): providerId is WebSessionProviderId {
+  return providerId === "chatgpt-web" || providerId === "gemini-web" || providerId === "deepseek-web";
+}
+
+export function isProviderId(value: unknown): value is ProviderId {
+  return typeof value === "string" && (value === "kimi-web" || value === "openai-compatible" || isWebSessionProvider(value as ProviderId));
+}
 
 export type DocumentKind = "webpage" | "bilibili" | "youtube" | "pdf";
 

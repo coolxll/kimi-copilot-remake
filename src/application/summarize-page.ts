@@ -1,7 +1,8 @@
 import { browser } from "wxt/browser";
 import { AppError, toAppError } from "../domain/errors";
 import { DEFAULT_PROMPT } from "../domain/types";
-import type { PageContext, ProviderId, SummaryEvent } from "../domain/types";
+import type { ExtractedDocument, PageContext, ProviderId, SummaryEvent } from "../domain/types";
+import { isYoutubePageUrl } from "../domain/youtube";
 import { selectExtractor } from "../extractors/registry";
 import type { AppServices } from "./services";
 import type { TaskAction } from "./task-state";
@@ -24,8 +25,9 @@ export async function runSummary(
     const provider = await services.getProvider(providerId);
     await provider.validateReady();
     dispatch({ type: "phase", phase: "extracting" });
-    const extractor = selectExtractor(services.extractors, context);
-    const document = await extractor.extract(context, signal);
+    const document = providerId === "gemini-web" && isYoutubePageUrl(context.url)
+      ? createDirectYoutubeDocument(context)
+      : await selectExtractor(services.extractors, context).extract(context, signal);
     const settings = await services.storage.getSettings();
     const prompt = settings.promptOverride?.trim() || DEFAULT_PROMPT;
     for await (const event of provider.summarize({ document, prompt }, signal)) dispatchEvent(event, dispatch);
@@ -42,6 +44,16 @@ export async function runSummary(
     }
     dispatch({ type: "error", error: appError });
   }
+}
+
+function createDirectYoutubeDocument(context: PageContext): ExtractedDocument {
+  return {
+    kind: "youtube",
+    title: context.title || "YouTube 视频",
+    sourceUrl: context.url,
+    sourceText: `YouTube 视频链接：${context.url}`,
+    warnings: [],
+  };
 }
 
 function dispatchEvent(event: SummaryEvent, dispatch: (action: TaskAction) => void): void {

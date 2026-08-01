@@ -52,3 +52,30 @@ export async function revokeApiHostPermission(apiRoot: string): Promise<void> {
     // Permission cleanup must not block saving a new valid configuration.
   }
 }
+
+export async function ensurePageHostPermission(value: string): Promise<void> {
+  const url = parsePageUrl(value);
+  if (url.protocol === "file:") return;
+  if (url.protocol !== "http:" && url.protocol !== "https:") {
+    throw new AppError("unsupported-page", "测试地址必须是网页、PDF 或本地 file 地址");
+  }
+  const origin = permissionOrigin(url);
+  if (await browser.permissions.contains({ origins: [origin] })) return;
+  const granted = await browser.permissions.request({ origins: [origin] });
+  if (!granted) throw new AppError("host-permission-denied", "未授权访问 " + url.origin);
+}
+
+export async function hasPageHostPermission(value: string): Promise<boolean> {
+  const url = parsePageUrl(value);
+  if (url.protocol === "file:") return true;
+  if (url.protocol !== "http:" && url.protocol !== "https:") return false;
+  return browser.permissions.contains({ origins: [permissionOrigin(url)] });
+}
+
+function parsePageUrl(value: string): URL {
+  try {
+    return new URL(value);
+  } catch (error) {
+    throw new AppError("unsupported-page", "测试地址不是有效 URL", { cause: error });
+  }
+}

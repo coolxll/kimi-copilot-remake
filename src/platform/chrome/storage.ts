@@ -4,7 +4,7 @@ import type {
   KimiTokens,
   OpenAICompatibleSecret,
 } from "../../domain/types";
-import { createDefaultSettings } from "../../domain/types";
+import { createDefaultSettings, isProviderId } from "../../domain/types";
 
 const SETTINGS_KEY = "settings:v2";
 const OPENAI_SECRET_KEY = "secrets:openai-compatible:v1";
@@ -25,7 +25,7 @@ export interface SettingsRepository {
 function isSettings(value: unknown): value is AppSettingsV2 {
   if (!value || typeof value !== "object") return false;
   const record = value as Record<string, unknown>;
-  return record.version === 2 && (record.defaultProvider === "kimi-web" || record.defaultProvider === "openai-compatible");
+  return record.version === 2 && isProviderId(record.defaultProvider);
 }
 
 export function createSettingsRepository(): SettingsRepository {

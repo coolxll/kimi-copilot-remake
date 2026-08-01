@@ -3,10 +3,12 @@ import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { browser } from "wxt/browser";
 import { AppError, toAppError } from "../../domain/errors";
-import type { AppSettingsV2, ProviderId } from "../../domain/types";
+import { isWebSessionProvider, PROVIDER_LABELS, type AppSettingsV2, type ProviderId } from "../../domain/types";
+import { isYoutubePageUrl } from "../../domain/youtube";
 import { getPageContext, runSummary } from "../../application/summarize-page";
 import { createAppServices } from "../../application/services";
 import { initialTaskState, taskReducer, type TaskState } from "../../application/task-state";
+import { ProviderBadge, ProviderIcon, ProviderPicker } from "../components/provider-brand";
 import "../styles.css";
 
 export function SidePanelApp() {
@@ -16,6 +18,7 @@ export function SidePanelApp() {
   const [state, dispatch] = useReducerCompat();
   const [tabId, setTabId] = useState<number>();
   const [pageError, setPageError] = useState<AppError>();
+  const [loginNotice, setLoginNotice] = useState<string>();
   const controllerRef = useRef<AbortController | undefined>(undefined);
 
   useEffect(() => {
@@ -37,10 +40,13 @@ export function SidePanelApp() {
         if (!disposed) {
           sourceTabId = activeTabId;
           setSettings(settingsValue);
-          setProvider(settingsValue.defaultProvider);
           setTabId(activeTabId);
           const context = await getPageContext(activeTabId);
-          if (!disposed) void start(settingsValue.defaultProvider, context, activeTabId);
+          const initialProvider: ProviderId = isYoutubePageUrl(context.url) ? "gemini-web" : settingsValue.defaultProvider;
+          if (!disposed) {
+            setProvider(initialProvider);
+            void start(initialProvider, context, activeTabId);
+          }
         }
       } catch (error) {
         if (!disposed) setPageError(toAppError(error));
@@ -71,11 +77,19 @@ export function SidePanelApp() {
   const handleProviderChange = (next: ProviderId) => {
     controllerRef.current?.abort("provider changed");
     setProvider(next);
+    setLoginNotice(undefined);
     dispatch({ type: "reset" });
   };
 
   const handleLogin = async () => {
     try {
+      setLoginNotice(undefined);
+      if (isWebSessionProvider(provider)) {
+        await services.webSessions.openLogin(provider);
+        setLoginNotice(`已打开 ${PROVIDER_LABELS[provider]} 页面。登录完成后回到这里点击“重新总结”。`);
+        dispatch({ type: "reset" });
+        return;
+      }
       await services.auth.openLoginAndWait();
       if (tabId) await start("kimi-web");
     } catch (error) {
@@ -92,29 +106,27 @@ export function SidePanelApp() {
     <header className="header">
       <div className="brand"><img src={browser.runtime.getURL("/icon-128.png")} alt="" /> Kimi Copilot</div>
       <div className="toolbar">
-        <select className="select" value={provider} onChange={(event) => handleProviderChange(event.target.value as ProviderId)} aria-label="总结后端">
-          <option value="kimi-web">Kimi Web</option>
-          <option value="openai-compatible">OpenAI Compatible</option>
-        </select>
+        <ProviderPicker value={provider} onChange={handleProviderChange} ariaLabel="总结后端" />
         <button className="button" onClick={openOptions}>选项</button>
       </div>
     </header>
 
     {pageError && <div className="error">{pageError.message}</div>}
+    {loginNotice && <div className="success">{loginNotice}</div>}
     {state.status === "auth-required" && <div className="card">
-      <p>{state.message}</p><button className="button primary" onClick={() => void handleLogin()}>登录 Kimi</button>
+      <p>{state.message}</p><button className="button primary provider-button" onClick={() => void handleLogin()}><ProviderIcon providerId={provider} />{isWebSessionProvider(provider) ? `打开 ${PROVIDER_LABELS[provider]}` : "登录 Kimi"}</button>
     </div>}
     {state.status === "provider-not-configured" && <div className="card">
       <p>{state.message}</p><button className="button primary" onClick={openOptions}>打开选项配置</button>
     </div>}
     {state.status === "loading" && <section className="card">
-      <div className="progress"><span className="spinner" /> {state.phase}{state.current && state.total ? ` ${state.current}/${state.total}` : ""}</div>
+      <div className="progress"><span className="spinner" /><ProviderBadge providerId={state.provider} /> · {state.phase}{state.current && state.total ? ` ${state.current}/${state.total}` : ""}</div>
       {state.markdown && <Markdown content={state.markdown} />}
       {state.warnings.map((warning) => <div className="warning" key={warning}>{warning}</div>)}
       <div className="actions"><button className="button" onClick={() => { controllerRef.current?.abort("user cancelled"); dispatch({ type: "reset" }); }}>取消</button></div>
     </section>}
     {state.status === "success" && <section className="card">
-      <Markdown content={state.markdown} />
+      <p className="muted output-provider"><span>输出后端：</span><ProviderBadge providerId={state.provider} /></p><Markdown content={state.markdown} />
       {state.warnings.map((warning) => <div className="warning" key={warning}>{warning}</div>)}
       <div className="actions">
         <div className="action-group">
@@ -128,8 +140,8 @@ export function SidePanelApp() {
       <div className="error">{state.error.message}</div>
       <div className="actions"><button className="button primary" onClick={() => void start(provider)} disabled={!state.canRetry}>重试</button><button className="button" onClick={openOptions}>打开选项</button></div>
     </section>}
-    {state.status === "idle" && <section className="card"><p>已切换到 {provider === "kimi-web" ? "Kimi Web" : "OpenAI Compatible"}。</p><button className="button primary" onClick={() => void start(provider)}>使用此后端重新总结</button></section>}
-    {settings && <p className="muted">当前后端：{provider === "kimi-web" ? "Kimi Web" : "OpenAI Compatible"} · 临时切换不会修改默认设置</p>}
+    {state.status === "idle" && <section className="card"><p className="current-provider">当前后端：<ProviderBadge providerId={provider} />。</p><button className="button primary provider-button" onClick={() => void start(provider)}><ProviderIcon providerId={provider} />使用此后端重新总结</button></section>}
+    {settings && <p className="muted current-provider">当前后端：<ProviderBadge providerId={provider} /> · 临时切换不会修改默认设置</p>}
   </div></main>;
 }
 

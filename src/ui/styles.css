@@ -19,10 +19,33 @@ button { cursor: pointer; }
 .page { padding: 20px; min-height: 100vh; }
 .panel { max-width: 720px; margin: 0 auto; }
 .header { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 18px; }
+.header-actions { display: flex; align-items: center; gap: 8px; }
 .brand { display: flex; align-items: center; gap: 8px; font-weight: 600; }
 .brand img { width: 22px; height: 22px; border-radius: 5px; }
 .toolbar { display: flex; align-items: center; gap: 8px; }
 .button { border: 1px solid #d1d5db; border-radius: 7px; padding: 7px 11px; background: transparent; color: inherit; }
+.provider-picker { position: relative; width: 100%; min-width: 0; }
+.provider-picker-trigger { display: flex; align-items: center; gap: 7px; width: 100%; border: 1px solid #d1d5db; border-radius: 7px; padding: 8px 10px; background: transparent; color: inherit; text-align: left; }
+.provider-picker-trigger > span:nth-child(2) { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.provider-picker-chevron { margin-left: auto; color: #6b7280; font-size: 16px; line-height: 1; }
+.provider-picker-menu { position: absolute; z-index: 20; top: calc(100% + 6px); right: 0; min-width: 100%; padding: 4px; border: 1px solid #d1d5db; border-radius: 9px; background: #fff; box-shadow: 0 10px 24px rgba(15, 23, 42, .16); }
+.provider-picker-option { display: flex; align-items: center; gap: 8px; width: 100%; border: 0; border-radius: 6px; padding: 8px; background: transparent; color: #111827; text-align: left; }
+.provider-picker-option:hover, .provider-picker-option[aria-selected="true"] { background: #eef2ff; }
+.provider-picker-option > span:nth-child(2) { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.provider-picker-check { margin-left: auto; color: #2563eb; font-weight: 700; }
+.provider-icon { display: inline-flex; flex: 0 0 auto; align-items: center; justify-content: center; width: 18px; height: 18px; color: #64748b; }
+.provider-icon svg { display: block; width: 100%; height: 100%; }
+.provider-icon-kimi-web { color: #5b5ce2; }
+.provider-icon-chatgpt-web { color: #10a37f; }
+.provider-icon-gemini-web { color: #4285f4; }
+.provider-icon-deepseek-web { color: #2563eb; }
+.provider-icon-openai-compatible { color: #64748b; }
+.provider-badge { display: inline-flex; align-items: center; gap: 6px; min-width: 0; vertical-align: middle; }
+.provider-badge > span:last-child { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.provider-button { display: inline-flex; align-items: center; gap: 7px; }
+.provider-heading { display: flex; align-items: center; gap: 8px; }
+.web-session-provider { display: inline-flex; align-items: center; flex: 1 1 220px; gap: 10px; min-width: 220px; }
+.output-provider, .current-provider { display: flex; align-items: center; flex-wrap: wrap; gap: 5px; }
 .button.primary { background: #2563eb; border-color: #2563eb; color: #fff; }
 .button.danger { color: #dc2626; }
 .button:disabled { opacity: .55; cursor: not-allowed; }
@@ -43,7 +66,12 @@ button { cursor: pointer; }
 .progress { display: flex; align-items: center; gap: 8px; color: #6b7280; font-size: 13px; }
 .spinner { width: 14px; height: 14px; border: 2px solid #d1d5db; border-top-color: #2563eb; border-radius: 50%; animation: spin .8s linear infinite; }
 .actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 14px; }
+.web-session-action-group { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; width: 100%; }
 .option-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(230px, 1fr)); gap: 12px; }
+.test-page .panel { max-width: 960px; }
+.test-page .subtitle-output { max-height: 65vh; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; margin: 0; padding: 14px; border: 1px solid #d1d5db; border-radius: 8px; background: rgba(255, 255, 255, .55); font: 13px/1.65 ui-monospace, SFMono-Regular, Menlo, monospace; }
+.test-page .tab-url { display: block; margin-top: 4px; color: #6b7280; font-size: 12px; overflow-wrap: anywhere; }
+@media (prefers-color-scheme: dark) { .test-page .subtitle-output { background: rgba(17, 24, 39, .65); border-color: #4b5563; } }
 
 /* The original side panel is a compact, flat surface rather than a card dashboard. */
 .sidepanel-page { padding: 20px; }
@@ -52,7 +80,11 @@ button { cursor: pointer; }
 .sidepanel-page .brand { gap: 6px; font-size: 12px; font-weight: 500; }
 .sidepanel-page .brand img { width: 16px; height: 16px; border-radius: 4px; }
 .sidepanel-page .toolbar { gap: 10px; }
-.sidepanel-page .select { width: auto; min-width: 145px; border-color: transparent; padding: 4px 6px; background: transparent; color: inherit; font-size: 12px; }
+.sidepanel-page .provider-picker { width: auto; min-width: 145px; }
+.sidepanel-page .provider-picker-trigger { border-color: transparent; padding: 4px 6px; background: transparent; font-size: 12px; }
+.sidepanel-page .provider-picker-menu { min-width: 190px; }
+.sidepanel-page .provider-picker-option { font-size: 12px; }
+.sidepanel-page .provider-icon { width: 16px; height: 16px; }
 .sidepanel-page .toolbar > .button { border: 0; padding: 0; color: #2563eb; font-size: 12px; font-weight: 500; text-decoration: underline; text-underline-offset: 2px; }
 .sidepanel-page .card { border: 0; border-radius: 0; padding: 0; margin-bottom: 14px; background: transparent; }
 .sidepanel-page .muted { margin-top: 16px; }
@@ -76,8 +108,13 @@ button { cursor: pointer; }
 .sidepanel-page .actions .icon-button:focus-visible { outline: 2px solid #2563eb; outline-offset: 2px; }
 .icon-button svg { width: 16px; height: 16px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
 .sidepanel-page .progress { font-size: 12px; }
+.sidepanel-page .provider-button { gap: 6px; }
+.sidepanel-page .output-provider, .sidepanel-page .current-provider { gap: 4px; }
 .sidepanel-page .warning { margin: 10px 0; }
 @media (prefers-color-scheme: dark) {
+  .provider-picker-menu { background: #1f2937; border-color: #4b5563; }
+  .provider-picker-option { color: #f3f4f6; }
+  .provider-picker-option:hover, .provider-picker-option[aria-selected="true"] { background: #374151; }
   .sidepanel-page .markdown blockquote { border-left-color: #596273; color: #b8c0cf; }
   .sidepanel-page .markdown hr { border-top-color: #454957; }
   .sidepanel-page .actions .button, .sidepanel-page .actions a.button, .sidepanel-page .toolbar > .button, .sidepanel-page .markdown a { color: #82aaff; }
