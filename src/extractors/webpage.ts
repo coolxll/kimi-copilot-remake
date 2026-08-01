@@ -4,6 +4,7 @@ import type { ContentExtractor } from "./extractor";
 import type { ExtractedDocument, PageContext } from "../domain/types";
 import { safeFilename } from "../shared/filename";
 import { cleanHtmlForUpload, htmlToMarkdown, wrapHtml } from "./html";
+import { throwIfAborted } from "../shared/abort";
 
 export class WebpageExtractor implements ContentExtractor {
   readonly id = "webpage" as const;
@@ -12,7 +13,8 @@ export class WebpageExtractor implements ContentExtractor {
     return true;
   }
 
-  async extract(context: PageContext): Promise<ExtractedDocument> {
+  async extract(context: PageContext, signal: AbortSignal): Promise<ExtractedDocument> {
+    throwIfAborted(signal);
     let page: { title: string; html: string; text: string } | undefined;
     try {
       const result = await browser.scripting.executeScript({
@@ -24,7 +26,9 @@ export class WebpageExtractor implements ContentExtractor {
         }),
       });
       page = result[0]?.result;
+      throwIfAborted(signal);
     } catch (error) {
+      if (signal.aborted) throw error;
       throw new AppError("extraction-failed", "无法读取页面，请检查扩展的网页或文件网址访问权限", { cause: error });
     }
     if (!page) throw new AppError("extraction-failed", "无法读取网页内容");

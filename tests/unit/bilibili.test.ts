@@ -238,6 +238,17 @@ describe("Bilibili background subtitle fetch", () => {
     expect(result.unavailableReason).toBe("无法确认 Bilibili 当前分 P，已拒绝使用不确定的字幕轨");
     expect(calls.some((url) => url.includes("/x/player/"))).toBe(false);
   });
+
+  it("stops the privileged subtitle request before starting network work when cancelled", async () => {
+    const controller = new AbortController();
+    controller.abort();
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(fetchBilibiliSubtitleInBackground({ videoRef: { bvid: "BV1Test" } }, controller.signal))
+      .rejects.toMatchObject({ code: "cancelled" });
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
 });
 
 describe("Bilibili comment fallback", () => {

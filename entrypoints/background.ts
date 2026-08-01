@@ -1,5 +1,6 @@
 import { browser } from "wxt/browser";
 import {
+  isBilibiliSubtitleCancelMessage,
   fetchBilibiliSubtitleInBackground,
   isBilibiliSubtitleMessage,
 } from "../src/platform/chrome/bilibili";
@@ -7,17 +8,30 @@ import { installWebSessionBackground } from "../src/integrations/web-session/bac
 
 export default defineBackground(() => {
   installWebSessionBackground();
+  const bilibiliRequests = new Map<string, AbortController>();
 
   browser.runtime.onMessage.addListener((message, _sender, sendResponse) => {
+    if (isBilibiliSubtitleCancelMessage(message)) {
+      bilibiliRequests.get(message.requestId)?.abort();
+      return undefined;
+    }
     if (!isBilibiliSubtitleMessage(message)) return undefined;
-    void fetchBilibiliSubtitleInBackground(message.request)
-      .then(sendResponse)
-      .catch(() => sendResponse({
-        subtitles: "",
-        pageCount: 0,
-        loginState: "unknown" as const,
-        unavailableReason: "扩展后台请求 B 站字幕失败",
-      }));
+    const requestId = message.requestId || `bilibili-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+    const controller = new AbortController();
+    bilibiliRequests.set(requestId, controller);
+    void fetchBilibiliSubtitleInBackground(message.request, controller.signal)
+      .then((response) => {
+        if (!controller.signal.aborted) sendResponse(response);
+      })
+      .catch(() => {
+        if (!controller.signal.aborted) sendResponse({
+          subtitles: "",
+          pageCount: 0,
+          loginState: "unknown" as const,
+          unavailableReason: "扩展后台请求 B 站字幕失败",
+        });
+      })
+      .finally(() => bilibiliRequests.delete(requestId));
     return true;
   });
 

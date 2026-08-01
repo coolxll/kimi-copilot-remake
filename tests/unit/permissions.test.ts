@@ -3,7 +3,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 vi.mock("wxt/browser", () => ({ browser: { permissions: { contains: vi.fn(), request: vi.fn(), remove: vi.fn() } } }));
 
 import { browser } from "wxt/browser";
-import { ensurePageHostPermission, validateApiRoot } from "../../src/platform/chrome/permissions";
+import { ensurePageHostPermission, shouldRevokeApiHostPermission, validateApiRoot } from "../../src/platform/chrome/permissions";
 
 describe("API Root validation", () => {
   afterEach(() => vi.clearAllMocks());
@@ -30,5 +30,11 @@ describe("API Root validation", () => {
   it("does not request a host permission for local files", async () => {
     await ensurePageHostPermission("file:///tmp/demo.pdf");
     expect(browser.permissions.request).not.toHaveBeenCalled();
+  });
+
+  it("revokes the old API origin when the compatible API configuration is cleared", () => {
+    expect(shouldRevokeApiHostPermission("https://old.example/v1", undefined)).toBe(true);
+    expect(shouldRevokeApiHostPermission("https://old.example/v1", "https://old.example/v1/")).toBe(false);
+    expect(shouldRevokeApiHostPermission(undefined, undefined)).toBe(false);
   });
 });

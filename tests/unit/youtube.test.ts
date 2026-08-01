@@ -6,6 +6,7 @@ import {
   parseYoutubeTranscript,
   stripYoutubeCaptionFormat,
 } from "../../src/domain/youtube";
+import { YoutubeExtractor } from "../../src/extractors/youtube";
 
 describe("YouTube page detection", () => {
   it("recognizes video pages across supported URL forms", () => {
@@ -13,6 +14,12 @@ describe("YouTube page detection", () => {
     expect(isYoutubePageUrl("https://youtu.be/demo")).toBe(true);
     expect(isYoutubePageUrl("https://www.youtube.com/shorts/demo")).toBe(true);
     expect(isYoutubePageUrl("https://www.youtube.com/channel/demo")).toBe(false);
+  });
+
+  it("does not treat a lookalike hostname as a YouTube page", () => {
+    const extractor = new YoutubeExtractor();
+    expect(extractor.canHandle({ tabId: 1, url: "https://youtube.com.evil.example/watch?v=demo" })).toBe(false);
+    expect(extractor.canHandle({ tabId: 1, url: "https://www.youtube.com/watch?v=demo" })).toBe(true);
   });
 });
 

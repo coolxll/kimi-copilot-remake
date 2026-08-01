@@ -5,6 +5,10 @@ export function normalizeApiRoot(value: string): string {
   return value.trim().replace(/\/+$/, "");
 }
 
+export function shouldRevokeApiHostPermission(oldRoot: string | undefined, nextRoot: string | undefined): boolean {
+  return Boolean(oldRoot && (!nextRoot || normalizeApiRoot(oldRoot) !== normalizeApiRoot(nextRoot)));
+}
+
 export function validateApiRoot(value: string): URL {
   const normalized = normalizeApiRoot(value);
   if (!normalized || /\/chat\/completions$/i.test(normalized)) {

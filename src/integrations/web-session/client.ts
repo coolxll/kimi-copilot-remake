@@ -3,6 +3,7 @@ import { AppError } from "../../domain/errors";
 import type { WebSessionCredential, WebSessionProviderId } from "../../domain/types";
 import type { SettingsRepository } from "../../platform/chrome/storage";
 import { ensurePageHostPermission, hasPageHostPermission } from "../../platform/chrome/permissions";
+import { abortableDelay, throwIfAborted, withAbort } from "../../shared/abort";
 import { WEB_SESSION_PORT_NAME, type WebSessionPortMessage } from "./messages";
 import { getWebSessionSpec } from "./specs";
 
@@ -28,7 +29,8 @@ type CaptureResult =
 export class WebSessionClient {
   constructor(private readonly storage: SettingsRepository) {}
 
-  async openLogin(providerId: WebSessionProviderId, timeoutMs = 120_000): Promise<void> {
+  async openLogin(providerId: WebSessionProviderId, timeoutMs = 120_000, signal?: AbortSignal): Promise<void> {
+    if (signal) throwIfAborted(signal);
     const spec = getWebSessionSpec(providerId);
     await ensurePageHostPermission(spec.loginUrl);
     const existing = await this.findProviderTab(providerId);
@@ -38,16 +40,27 @@ export class WebSessionClient {
       : await browser.tabs.update(existing.id, { active: true }) as unknown as BrowserTab;
     if (typeof tab.id !== "number") throw new AppError("auth-required", `无法打开 ${spec.label} 登录页`);
     try {
-      await waitForTabReady(tab.id, new AbortController().signal);
+      await waitForTabReady(tab.id, signal ?? new AbortController().signal);
       const deadline = Date.now() + timeoutMs;
       while (Date.now() < deadline) {
-        const result = await captureWebSessionCredential(tab.id, providerId).catch(() => ({ status: "logged-out" } as CaptureResult));
+        if (signal) throwIfAborted(signal);
+        let result: CaptureResult;
+        try {
+          result = signal
+            ? await withAbort(captureWebSessionCredential(tab.id, providerId), signal)
+            : await captureWebSessionCredential(tab.id, providerId);
+        } catch (error) {
+          if (signal?.aborted) throw error;
+          result = { status: "logged-out" };
+        }
         if (result.status === "ok") {
+          if (signal) throwIfAborted(signal);
           await this.storage.saveWebSessionCredential(result.credential);
           return;
         }
         if (result.status === "failed") throw new AppError("api-contract", result.message, { retryable: true });
-        await delay(1_000);
+        if (signal) await abortableDelay(1_000, signal);
+        else await delay(1_000);
       }
       throw new AppError("auth-required", `等待 ${spec.label} 登录超时`, { retryable: true });
     } finally {
@@ -71,7 +84,7 @@ export class WebSessionClient {
       if (!(await hasPageHostPermission(spec.loginUrl))) return "permission-required";
       if (await this.storage.getWebSessionCredential(providerId)) return "logged-in";
       const tab = await this.findProviderTab(providerId);
-      if (typeof tab?.id !== "number" || !tab.url?.startsWith(spec.origin)) return "no-page";
+      if (typeof tab?.id !== "number" || !isTabForOrigin(tab.url, spec.origin)) return "no-page";
       const result = await browser.scripting.executeScript({
         target: { tabId: tab.id },
         world: "MAIN",
@@ -139,11 +152,20 @@ export class WebSessionClient {
       return undefined;
     }
     return tabs
-      .filter((tab) => typeof tab.id === "number" && tab.url?.startsWith(spec.origin))
+      .filter((tab) => typeof tab.id === "number" && isTabForOrigin(tab.url, spec.origin))
       .sort((left, right) => {
         if (left.active !== right.active) return left.active ? -1 : 1;
         return (right.lastAccessed ?? 0) - (left.lastAccessed ?? 0);
       })[0];
+  }
+}
+
+function isTabForOrigin(value: string | undefined, expectedOrigin: string): boolean {
+  if (!value) return false;
+  try {
+    return new URL(value).origin === expectedOrigin;
+  } catch {
+    return false;
   }
 }
 
@@ -293,7 +315,7 @@ async function waitForTabReady(tabId: number, signal: AbortSignal): Promise<void
     if (signal.aborted) throw signal.reason ?? new DOMException("Aborted", "AbortError");
     const tab = await browser.tabs.get(tabId) as unknown as BrowserTab;
     if (tab.status === "complete" && tab.url) return;
-    await delay(500);
+    await abortableDelay(500, signal);
   }
   throw new AppError("api-unavailable", "登录页面加载超时，请稍后重试", { retryable: true });
 }

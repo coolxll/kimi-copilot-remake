@@ -6,6 +6,7 @@ import type { ContentExtractor } from "./extractor";
 import type { ExtractedDocument, PageContext } from "../domain/types";
 import { requestBilibiliSubtitle, type BilibiliSubtitleFetchResponse } from "../platform/chrome/bilibili";
 import { safeFilename } from "../shared/filename";
+import { throwIfAborted } from "../shared/abort";
 
 // Keep the existing public test/import surface stable while the shared helpers
 // are also used by the background subtitle client.
@@ -37,7 +38,8 @@ export class BilibiliExtractor implements ContentExtractor {
     return Boolean(parseBilibiliVideoUrl(context.url));
   }
 
-  async extract(context: PageContext): Promise<ExtractedDocument> {
+  async extract(context: PageContext, signal: AbortSignal): Promise<ExtractedDocument> {
+    throwIfAborted(signal);
     const videoRef = parseBilibiliVideoUrl(context.url);
     if (!videoRef) throw new AppError("unsupported-page", "无效的 Bilibili 视频地址");
 
@@ -116,15 +118,18 @@ export class BilibiliExtractor implements ContentExtractor {
         args: [videoRef],
       });
       page = result[0]?.result;
+      throwIfAborted(signal);
     } catch (error) {
+      if (signal.aborted) throw error;
       throw new AppError("extraction-failed", "无法读取 Bilibili 页面内容", { cause: error });
     }
     if (!page) throw new AppError("extraction-failed", "无法读取 Bilibili 页面内容");
 
     let subtitles: BilibiliSubtitleFetchResponse;
     try {
-      subtitles = await requestBilibiliSubtitle({ videoRef, currentCid: page.currentCid });
+      subtitles = await requestBilibiliSubtitle({ videoRef, currentCid: page.currentCid }, signal);
     } catch (error) {
+      if (signal.aborted) throw error;
       throw new AppError("extraction-failed", "无法读取 Bilibili 字幕接口", { cause: error });
     }
 

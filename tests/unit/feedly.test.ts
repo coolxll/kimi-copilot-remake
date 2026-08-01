@@ -6,6 +6,7 @@ import {
   compareFeedlyCandidates,
   FeedlyExtractor,
   formatFeedlyList,
+  isFeedlyCandidateForEntry,
   isFeedlyArticleUrl,
   type FeedlyFrameSnapshot,
   type FeedlyListItemSnapshot,
@@ -94,11 +95,13 @@ describe("Feedly article candidate selection", () => {
     expect(compareFeedlyCandidates(short, long)).toBeGreaterThan(0);
   });
 
-  it("keeps the rendered article over a longer API fallback", () => {
-    const dom = frame({ text: "页面正文".repeat(20) }).candidate!;
-    const api = frame({ title: "API 标题", text: "API 正文".repeat(40) }).candidate!;
-    expect(chooseFeedlySource(dom, api)).toBe(dom);
-    expect(chooseFeedlySource(undefined, api)).toBe(api);
+  it("requires the rendered article to match the current entry before preferring DOM", () => {
+    const dom = frame({ entryId: "entry-wrong", text: "页面正文".repeat(20) }).candidate!;
+    const api = frame({ entryId: "entry-current", title: "API 标题", text: "API 正文".repeat(40) }).candidate!;
+    expect(chooseFeedlySource(dom, api, "entry-current")).toBe(api);
+    expect(isFeedlyCandidateForEntry(dom, "entry-current")).toBe(false);
+    expect(chooseFeedlySource({ ...dom, entryId: "entry-current" }, api, "entry-current")).not.toBe(api);
+    expect(chooseFeedlySource(undefined, api, "entry-current")).toBe(api);
   });
 
   it("keeps list mode separate from an opened article", () => {
@@ -115,6 +118,17 @@ describe("Feedly article candidate selection", () => {
     const opened = frame({ title: "已打开正文", text: "正文".repeat(80) });
     const articleSnapshot = chooseFeedlySnapshot([{ ...opened, articleCandidate: opened.candidate, listItems: list }]);
     expect(articleSnapshot?.articleCandidate?.title).toBe("已打开正文");
+
+    const exact = frame({ entryId: "entry-current", title: "当前正文", text: "当前正文".repeat(20), score: 1 }).candidate!;
+    const unrelated = frame({ entryId: "entry-other", title: "推荐正文", text: "推荐正文".repeat(80), score: 500 }).candidate!;
+    expect(chooseFeedlyCandidate([
+      { frameUrl: exact.frameUrl, pageTitle: exact.pageTitle, articleCandidate: exact },
+      { frameUrl: unrelated.frameUrl, pageTitle: unrelated.pageTitle, articleCandidate: unrelated },
+    ], "entry-current")).toBe(exact);
+    expect(chooseFeedlySnapshot([
+      { frameUrl: exact.frameUrl, pageTitle: exact.pageTitle, articleCandidate: exact },
+      { frameUrl: unrelated.frameUrl, pageTitle: unrelated.pageTitle, articleCandidate: unrelated },
+    ], "entry-current")?.articleCandidate).toBe(exact);
   });
 
   it("formats every list item in DOM order", () => {

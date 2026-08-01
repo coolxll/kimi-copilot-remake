@@ -6,6 +6,7 @@ import {
   selectBilibiliPage,
 } from "../../domain/bilibili";
 import type { BilibiliPage, BilibiliSubtitleTrack, BilibiliVideoRef } from "../../domain/bilibili";
+import { abortableDelay, throwIfAborted, withAbort } from "../../shared/abort";
 
 export type BilibiliLoginState = "logged-in" | "logged-out" | "unknown";
 
@@ -30,10 +31,17 @@ export interface BilibiliSubtitleFetchResponse {
 }
 
 export const BILIBILI_SUBTITLE_MESSAGE = "kimi-copilot:fetch-bilibili-subtitle" as const;
+export const BILIBILI_SUBTITLE_CANCEL_MESSAGE = "kimi-copilot:cancel-bilibili-subtitle" as const;
 
 export interface BilibiliSubtitleMessage {
   type: typeof BILIBILI_SUBTITLE_MESSAGE;
   request: BilibiliSubtitleFetchRequest;
+  requestId?: string;
+}
+
+export interface BilibiliSubtitleCancelMessage {
+  type: typeof BILIBILI_SUBTITLE_CANCEL_MESSAGE;
+  requestId: string;
 }
 
 interface ApiResponse<T> {
@@ -77,11 +85,23 @@ const API_ROOT = "https://api.bilibili.com";
 /** The side panel asks the extension service worker to perform the privileged fetch. */
 export async function requestBilibiliSubtitle(
   request: BilibiliSubtitleFetchRequest,
+  signal?: AbortSignal,
 ): Promise<BilibiliSubtitleFetchResponse> {
-  const result = await browser.runtime.sendMessage({
+  if (signal) throwIfAborted(signal);
+  const requestId = `bilibili-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+  const resultPromise = browser.runtime.sendMessage({
     type: BILIBILI_SUBTITLE_MESSAGE,
     request,
+    requestId,
   } satisfies BilibiliSubtitleMessage);
+  let result: unknown;
+  try {
+    result = signal ? await withAbort(resultPromise, signal) : await resultPromise;
+  } finally {
+    if (signal?.aborted) {
+      void browser.runtime.sendMessage({ type: BILIBILI_SUBTITLE_CANCEL_MESSAGE, requestId } satisfies BilibiliSubtitleCancelMessage).catch(() => undefined);
+    }
+  }
   if (!result || typeof result !== "object" || typeof (result as BilibiliSubtitleFetchResponse).subtitles !== "string") {
     throw new Error("Bilibili 后台字幕请求返回了无效结果");
   }
@@ -95,17 +115,26 @@ export function isBilibiliSubtitleMessage(value: unknown): value is BilibiliSubt
     && Boolean(record.request && typeof record.request === "object");
 }
 
+export function isBilibiliSubtitleCancelMessage(value: unknown): value is BilibiliSubtitleCancelMessage {
+  if (!value || typeof value !== "object") return false;
+  const record = value as Record<string, unknown>;
+  return record.type === BILIBILI_SUBTITLE_CANCEL_MESSAGE && typeof record.requestId === "string";
+}
+
 /** Runs only in the extension service worker, where host permissions enable cross-origin fetch. */
 export async function fetchBilibiliSubtitleInBackground(
   request: BilibiliSubtitleFetchRequest,
+  signal?: AbortSignal,
 ): Promise<BilibiliSubtitleFetchResponse> {
+  if (signal) throwIfAborted(signal);
   const { videoRef } = request;
   const viewQuery = new URLSearchParams();
   if (videoRef.bvid) viewQuery.set("bvid", videoRef.bvid);
   else if (videoRef.aid) viewQuery.set("aid", videoRef.aid);
   if (videoRef.pageNumber !== undefined) viewQuery.set("p", String(videoRef.pageNumber));
 
-  const viewResult = await getJson<ApiResponse<ViewData>>(`${API_ROOT}/x/web-interface/view?${viewQuery.toString()}`, "include");
+  const viewResult = await getJson<ApiResponse<ViewData>>(`${API_ROOT}/x/web-interface/view?${viewQuery.toString()}`, "include", signal);
+  if (signal) throwIfAborted(signal);
   const view = viewResult.data;
   if (!viewResult.ok || view?.code !== 0 || !view.data) {
     return unavailable("B 站视频信息接口请求失败");
@@ -156,7 +185,9 @@ export async function fetchBilibiliSubtitleInBackground(
         const playerResult = await getJson<ApiResponse<PlayerData>>(
           `${API_ROOT}/${endpoint}?${playerQuery.toString()}`,
           "include",
+          signal,
         );
+        if (signal) throwIfAborted(signal);
         const player = playerResult.data;
         if (!playerResult.ok || player?.code !== 0 || !player.data) continue;
         const playerData = player.data;
@@ -174,7 +205,7 @@ export async function fetchBilibiliSubtitleInBackground(
       }
       if (tracks.length > 0) break;
     }
-    if (tracks.length === 0 && attempt === 0) await delay(250);
+    if (tracks.length === 0 && attempt === 0) await delay(250, signal);
   }
 
   if (!tracks.length && identityMismatch) return unavailable(partial, "Bilibili 字幕接口返回了不匹配的视频");
@@ -186,7 +217,8 @@ export async function fetchBilibiliSubtitleInBackground(
 
   const subtitleUrl = normalizeSubtitleUrl(selectedTrack.subtitle_url);
   if (!subtitleUrl) return unavailable(partial, "B 站字幕资源地址无效");
-  const subtitleResult = await getJson<SubtitleBody>(subtitleUrl, "omit");
+  const subtitleResult = await getJson<SubtitleBody>(subtitleUrl, "omit", signal);
+  if (signal) throwIfAborted(signal);
   const body = subtitleResult.data?.body;
   if (!subtitleResult.ok || !Array.isArray(body)) {
     return unavailable(partial, "B 站字幕资源下载失败");
@@ -237,26 +269,27 @@ export async function fetchBilibiliSubtitleInBackground(
       ...metadata,
       subtitles: "",
       pageCount: metadata.pageCount ?? 0,
-      loginState: await probeBilibiliLoginState(),
+      loginState: await probeBilibiliLoginState(signal),
       unavailableReason: reason,
     };
   }
 }
 
-async function probeBilibiliLoginState(): Promise<BilibiliLoginState> {
-  const result = await getJson<ApiResponse<NavData>>(`${API_ROOT}/x/web-interface/nav`, "include");
+async function probeBilibiliLoginState(signal?: AbortSignal): Promise<BilibiliLoginState> {
+  const result = await getJson<ApiResponse<NavData>>(`${API_ROOT}/x/web-interface/nav`, "include", signal);
   const value = result.data?.data?.isLogin;
   if (!result.ok || result.data?.code !== 0 || value === undefined) return "unknown";
   return value === true || value === 1 ? "logged-in" : "logged-out";
 }
 
-async function getJson<T>(url: string, credentials: RequestCredentials): Promise<JsonResult<T>> {
+async function getJson<T>(url: string, credentials: RequestCredentials, signal?: AbortSignal): Promise<JsonResult<T>> {
   try {
     const response = await fetch(url, {
       credentials,
       cache: "no-store",
       headers: { Accept: "application/json" },
       referrer: "https://www.bilibili.com/",
+      signal,
     });
     let data: T | undefined;
     try {
@@ -265,7 +298,8 @@ async function getJson<T>(url: string, credentials: RequestCredentials): Promise
       data = undefined;
     }
     return { ok: response.ok, data };
-  } catch {
+  } catch (error) {
+    if (signal?.aborted) throw error;
     return { ok: false };
   }
 }
@@ -289,6 +323,6 @@ function normalizeSubtitleUrl(rawUrl: string): string | undefined {
   }
 }
 
-function delay(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
+function delay(ms: number, signal?: AbortSignal): Promise<void> {
+  return signal ? abortableDelay(ms, signal) : new Promise((resolve) => setTimeout(resolve, ms));
 }

@@ -1,9 +1,9 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { browser } from "wxt/browser";
 import type { AppSettingsV2, OpenAICompatibleConfig, WebSessionProviderId } from "../../domain/types";
 import { DEFAULT_CHUNK_CHARS, DEFAULT_MAX_SOURCE_CHARS, DEFAULT_PROMPT, PROVIDER_LABELS } from "../../domain/types";
 import { AppError, toAppError } from "../../domain/errors";
-import { ensureApiHostPermission, normalizeApiRoot, revokeApiHostPermission, validateApiRoot } from "../../platform/chrome/permissions";
+import { ensureApiHostPermission, normalizeApiRoot, revokeApiHostPermission, shouldRevokeApiHostPermission, validateApiRoot } from "../../platform/chrome/permissions";
 import { createAppServices } from "../../application/services";
 import type { WebSessionLoginStatus } from "../../integrations/web-session/client";
 import { WEB_SESSION_PROVIDER_IDS } from "../../integrations/web-session/specs";
@@ -21,6 +21,7 @@ export function OptionsApp() {
   const [hasKimiToken, setHasKimiToken] = useState(false);
   const [webStatuses, setWebStatuses] = useState<Record<WebSessionProviderId, WebSessionLoginStatus>>(createInitialWebSessionStatuses);
   const [checkingWebStatus, setCheckingWebStatus] = useState<WebSessionProviderId | "all" | null>(null);
+  const loginControllerRef = useRef<AbortController | undefined>(undefined);
   const [notice, setNotice] = useState<{ kind: "success" | "error"; text: string }>();
   const [saving, setSaving] = useState(false);
 
@@ -55,8 +56,16 @@ export function OptionsApp() {
       }
     })();
     void refreshWebSessionStatuses();
+    return () => loginControllerRef.current?.abort("options closed");
     // Services are stable for this options page.
   }, []);
+
+  const beginLogin = (): AbortController => {
+    loginControllerRef.current?.abort("new login");
+    const controller = new AbortController();
+    loginControllerRef.current = controller;
+    return controller;
+  };
 
   const save = async () => {
     setSaving(true);
@@ -81,7 +90,7 @@ export function OptionsApp() {
         setHasToken(true);
         setToken("");
       }
-      if (oldRoot && nextConfig && normalizeApiRoot(oldRoot) !== nextConfig.apiRoot) await revokeApiHostPermission(oldRoot);
+      if (oldRoot && shouldRevokeApiHostPermission(oldRoot, nextConfig?.apiRoot)) await revokeApiHostPermission(oldRoot);
       setSettings(nextSettings);
       setNotice({ kind: "success", text: "保存成功" });
     } catch (error) {
@@ -114,12 +123,15 @@ export function OptionsApp() {
 
   const loginKimi = async () => {
     setNotice(undefined);
+    const controller = beginLogin();
     try {
-      await services.auth.openLoginAndWait();
+      await services.auth.openLoginAndWait(120_000, controller.signal);
       setHasKimiToken(true);
       setNotice({ kind: "success", text: "Kimi 登录态已保存" });
     } catch (error) {
-      setNotice({ kind: "error", text: toAppError(error).message });
+      if (!controller.signal.aborted) setNotice({ kind: "error", text: toAppError(error).message });
+    } finally {
+      if (loginControllerRef.current === controller) loginControllerRef.current = undefined;
     }
   };
 
@@ -131,12 +143,15 @@ export function OptionsApp() {
 
   const openWebSession = async (providerId: WebSessionProviderId) => {
     setNotice(undefined);
+    const controller = beginLogin();
     try {
-      await services.webSessions.openLogin(providerId);
+      await services.webSessions.openLogin(providerId, 120_000, controller.signal);
       void refreshWebSessionStatuses(providerId);
       setNotice({ kind: "success", text: `${PROVIDER_LABELS[providerId]} 登录态已保存，正常总结时使用后台 Web 协议。` });
     } catch (error) {
-      setNotice({ kind: "error", text: toAppError(error).message });
+      if (!controller.signal.aborted) setNotice({ kind: "error", text: toAppError(error).message });
+    } finally {
+      if (loginControllerRef.current === controller) loginControllerRef.current = undefined;
     }
   };
 

@@ -3,6 +3,7 @@ import { AppError } from "../domain/errors";
 import {
   chooseYoutubeCaptionTrack,
   isYoutubeCaptionUrlPoTokenGated,
+  isYoutubePageUrl,
   parseYoutubeTranscript,
   stripYoutubeCaptionFormat,
   type YoutubeCaptionTrack,
@@ -64,7 +65,7 @@ export class YoutubeExtractor implements ContentExtractor {
   readonly id = "youtube" as const;
 
   canHandle(context: PageContext): boolean {
-    return /(?:youtube\.com\/(?:watch|shorts|live)|youtu\.be\/)/i.test(context.url);
+    return isYoutubePageUrl(context.url);
   }
 
   async extract(context: PageContext, signal: AbortSignal): Promise<ExtractedDocument> {
@@ -211,6 +212,7 @@ export class YoutubeExtractor implements ContentExtractor {
       });
       page = result[0]?.result;
     } catch (error) {
+      if (signal.aborted) throw error;
       throw new AppError("extraction-failed", "无法读取 YouTube 播放器数据或页面内容", { cause: error });
     }
     if (!page) throw new AppError("extraction-failed", "无法读取 YouTube 视频信息");

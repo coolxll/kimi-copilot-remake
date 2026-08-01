@@ -104,4 +104,23 @@ describe("WebSessionClient", () => {
     expect(storage.saveWebSessionCredential).toHaveBeenCalledWith(expect.objectContaining({ accessToken: "new-token" }));
     expect(browserMock.tabs.remove).toHaveBeenCalledWith(77);
   });
+
+  it("ignores lookalike provider tabs outside the exact origin", async () => {
+    browserMock.permissions.contains.mockResolvedValue(true);
+    browserMock.tabs.query.mockResolvedValue([
+      { id: 91, url: "https://chatgpt.com.evil.example/", active: true },
+    ]);
+    const status = await new WebSessionClient(makeStorage({ getWebSessionCredential: vi.fn(async () => null) }))
+      .detectLoginStatus("chatgpt-web");
+    expect(status).toBe("no-page");
+    expect(browserMock.scripting.executeScript).not.toHaveBeenCalled();
+  });
+
+  it("does not open a login tab after cancellation", async () => {
+    const controller = new AbortController();
+    controller.abort();
+    await expect(new WebSessionClient(makeStorage()).openLogin("chatgpt-web", 120_000, controller.signal))
+      .rejects.toMatchObject({ code: "cancelled" });
+    expect(browserMock.tabs.create).not.toHaveBeenCalled();
+  });
 });

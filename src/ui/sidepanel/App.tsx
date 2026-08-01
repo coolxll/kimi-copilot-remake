@@ -82,18 +82,21 @@ export function SidePanelApp() {
   };
 
   const handleLogin = async () => {
+    controllerRef.current?.abort("login started");
+    const controller = new AbortController();
+    controllerRef.current = controller;
     try {
       setLoginNotice(undefined);
       if (isWebSessionProvider(provider)) {
-        await services.webSessions.openLogin(provider);
+        await services.webSessions.openLogin(provider, 120_000, controller.signal);
         setLoginNotice(`${PROVIDER_LABELS[provider]} 登录态已更新，正在重新总结。`);
         if (tabId) await start(provider, undefined, tabId);
         return;
       }
-      await services.auth.openLoginAndWait();
+      await services.auth.openLoginAndWait(120_000, controller.signal);
       if (tabId) await start("kimi-web");
     } catch (error) {
-      dispatch({ type: "error", error: toAppError(error) });
+      if (!controller.signal.aborted) dispatch({ type: "error", error: toAppError(error) });
     }
   };
 

@@ -60,19 +60,32 @@ export function isFeedlyArticleUrl(value: string): boolean {
 export function chooseFeedlySource(
   domCandidate: FeedlyCandidateSnapshot | undefined,
   apiCandidate: FeedlyCandidateSnapshot | undefined,
+  expectedEntryId?: string,
 ): FeedlyCandidateSnapshot | undefined {
-  return domCandidate ?? apiCandidate;
+  if (!expectedEntryId) return domCandidate ?? apiCandidate;
+  if (domCandidate && isFeedlyCandidateForEntry(domCandidate, expectedEntryId)) return domCandidate;
+  return apiCandidate && isFeedlyCandidateForEntry(apiCandidate, expectedEntryId) ? apiCandidate : undefined;
 }
 
-export function chooseFeedlyCandidate(frames: FeedlyFrameSnapshot[]): FeedlyCandidateSnapshot | undefined {
+export function chooseFeedlyCandidate(
+  frames: FeedlyFrameSnapshot[],
+  expectedEntryId?: string,
+): FeedlyCandidateSnapshot | undefined {
   const candidates = frames
     .flatMap((frame) => [frame.articleCandidate, frame.listItems?.length ? undefined : frame.candidate])
     .filter((candidate): candidate is FeedlyCandidateSnapshot => Boolean(candidate?.feedlyFrame && candidate.text.trim()))
     .sort(compareFeedlyCandidates);
-  return candidates.find((candidate) => candidate.text.trim().length >= FEEDLY_MIN_TEXT) ?? candidates[0];
+  return (expectedEntryId
+    ? candidates.find((candidate) => isFeedlyCandidateForEntry(candidate, expectedEntryId))
+    : undefined)
+    ?? candidates.find((candidate) => candidate.text.trim().length >= FEEDLY_MIN_TEXT)
+    ?? candidates[0];
 }
 
-export function chooseFeedlySnapshot(frames: FeedlyFrameSnapshot[]): FeedlyPageSnapshot | undefined {
+export function chooseFeedlySnapshot(
+  frames: FeedlyFrameSnapshot[],
+  expectedEntryId?: string,
+): FeedlyPageSnapshot | undefined {
   const articleCandidates = frames
     .flatMap((frame) => [frame.articleCandidate, frame.listItems?.length ? undefined : frame.candidate])
     .filter((candidate): candidate is FeedlyCandidateSnapshot => Boolean(candidate?.feedlyFrame && candidate.text.trim()))
@@ -81,7 +94,9 @@ export function chooseFeedlySnapshot(frames: FeedlyFrameSnapshot[]): FeedlyPageS
     .map((frame) => ({ frame, listItems: (frame.listItems ?? []).filter((item) => item.feedlyFrame) }))
     .filter(({ listItems }) => listItems.some((item) => item.feedlyFrame))
     .sort((left, right) => compareFeedlyListFrames(left.listItems, right.listItems))[0];
-  const articleCandidate = articleCandidates[0];
+  const articleCandidate = expectedEntryId
+    ? articleCandidates.find((candidate) => isFeedlyCandidateForEntry(candidate, expectedEntryId)) ?? articleCandidates[0]
+    : articleCandidates[0];
   if (!articleCandidate && !listFrame) return undefined;
   return {
     frameUrl: articleCandidate?.frameUrl ?? listFrame?.frame.frameUrl ?? "",
@@ -94,6 +109,14 @@ export function chooseFeedlySnapshot(frames: FeedlyFrameSnapshot[]): FeedlyPageS
 export function compareFeedlyCandidates(left: FeedlyCandidateSnapshot, right: FeedlyCandidateSnapshot): number {
   const quality = candidateQuality(right) - candidateQuality(left);
   return quality || right.text.length - left.text.length;
+}
+
+export function isFeedlyCandidateForEntry(
+  candidate: FeedlyCandidateSnapshot | undefined,
+  expectedEntryId: string | undefined,
+): boolean {
+  if (!candidate?.entryId || !expectedEntryId) return false;
+  return normalizeFeedlyEntryId(candidate.entryId) === normalizeFeedlyEntryId(expectedEntryId);
 }
 
 export function formatFeedlyList(
@@ -133,10 +156,19 @@ export class FeedlyExtractor implements ContentExtractor {
       return undefined;
     });
 
-    // The open reading pane wins over every list item. This also prevents the
-    // URL's entry ID from accidentally turning a list view into API article mode.
+    // An identity-matched open reading pane wins over every list item. A DOM
+    // candidate with another/missing ID is not allowed to turn a list view into
+    // an unrelated article; only an exact API fallback may be used then.
     if (pageSnapshot?.articleCandidate && isUsableCandidate(pageSnapshot.articleCandidate)) {
-      return createArticleDocument(context, pageSnapshot.articleCandidate);
+      if (entryId && !isFeedlyCandidateForEntry(pageSnapshot.articleCandidate, entryId) && pageSnapshot.listItems.length) {
+        return createListDocument(context, pageSnapshot);
+      }
+      const apiCandidate = entryId && !isFeedlyCandidateForEntry(pageSnapshot.articleCandidate, entryId)
+        ? await fetchFeedlyEntry(entryId, signal).then((entry) => entry ? createApiCandidate(entry, context.url, entryId) : undefined)
+        : undefined;
+      const candidate = chooseFeedlySource(pageSnapshot.articleCandidate, apiCandidate, entryId);
+      if (candidate) return createArticleDocument(context, candidate);
+      throw new AppError("extraction-failed", "Feedly 当前正文无法确认对应文章，已拒绝读取不相关内容");
     }
     if (pageSnapshot?.listItems.length) {
       return createListDocument(context, pageSnapshot);
@@ -146,8 +178,8 @@ export class FeedlyExtractor implements ContentExtractor {
     // the exact entry from the API as a last-resort article fallback.
     if (entryId) {
       const apiEntry = await fetchFeedlyEntry(entryId, signal);
-      const apiCandidate = apiEntry ? createApiCandidate(apiEntry, context.url) : undefined;
-      const candidate = chooseFeedlySource(undefined, apiCandidate);
+      const apiCandidate = apiEntry ? createApiCandidate(apiEntry, context.url, entryId) : undefined;
+      const candidate = chooseFeedlySource(undefined, apiCandidate, entryId);
       if (candidate) return createArticleDocument(context, candidate);
     }
 
@@ -195,7 +227,7 @@ function createListDocument(context: PageContext, snapshot: FeedlyPageSnapshot):
   };
 }
 
-function createApiCandidate(entry: FeedlyEntryContent, sourceUrl: string): FeedlyCandidateSnapshot | undefined {
+function createApiCandidate(entry: FeedlyEntryContent, sourceUrl: string, entryId?: string): FeedlyCandidateSnapshot | undefined {
   const cleanHtml = cleanHtmlForUpload(entry.html);
   const text = htmlToMarkdown(cleanHtml);
   if (!text.trim()) return undefined;
@@ -207,6 +239,7 @@ function createApiCandidate(entry: FeedlyEntryContent, sourceUrl: string): Feedl
     text,
     score: 0,
     feedlyFrame: true,
+    entryId,
   };
 }
 
@@ -224,7 +257,7 @@ async function readFeedlySnapshot(
 
     try {
       const frames = await executeFeedlyScript(tabId, expectedEntryId, tryAllFrames);
-      const snapshot = chooseFeedlySnapshot(frames);
+      const snapshot = chooseFeedlySnapshot(frames, expectedEntryId);
       if (snapshot) {
         if (!bestSnapshot || pageSnapshotQuality(snapshot) > pageSnapshotQuality(bestSnapshot)) bestSnapshot = snapshot;
         if (snapshot.articleCandidate && isUsableCandidate(snapshot.articleCandidate)) return snapshot;
@@ -235,7 +268,7 @@ async function readFeedlySnapshot(
         tryAllFrames = false;
         try {
           const frames = await executeFeedlyScript(tabId, expectedEntryId, false);
-          const snapshot = chooseFeedlySnapshot(frames);
+          const snapshot = chooseFeedlySnapshot(frames, expectedEntryId);
           if (snapshot) {
             if (!bestSnapshot || pageSnapshotQuality(snapshot) > pageSnapshotQuality(bestSnapshot)) bestSnapshot = snapshot;
             if (snapshot.articleCandidate && isUsableCandidate(snapshot.articleCandidate)) return snapshot;
@@ -581,6 +614,10 @@ function collectFeedlyFrame(expectedEntryId: string | null): FeedlyFrameSnapshot
 
 function candidateQuality(candidate: FeedlyCandidateSnapshot): number {
   return candidate.score + Math.min(candidate.text.trim().length, 30_000) / 400;
+}
+
+function normalizeFeedlyEntryId(value: string): string {
+  return value.trim().replace(/^entry:/i, "");
 }
 
 function compareFeedlyListFrames(
