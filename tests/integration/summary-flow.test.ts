@@ -13,7 +13,11 @@ function makeServices(provider: SummaryProvider, extract: ExtractFn = vi.fn(asyn
     auth: {} as never,
     webSessions: {} as never,
     extractors: [{
-      id: "webpage",
+      descriptor: {
+        id: "webpage",
+        label: "普通网页",
+        outputKind: "webpage",
+      },
       canHandle: () => true,
       extract,
     }],

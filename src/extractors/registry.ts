@@ -7,11 +7,23 @@ import { PdfExtractor } from "./pdf";
 import { WebpageExtractor } from "./webpage";
 import { YoutubeExtractor } from "./youtube";
 
-export function createExtractorRegistry(): ContentExtractor[] {
-  return [new PdfExtractor(), new YoutubeExtractor(), new BilibiliExtractor(), new FeedlyExtractor(), new WebpageExtractor()];
+type ExtractorFactory = () => ContentExtractor;
+
+// The order is part of the routing contract: specialized extractors must run
+// before the generic webpage fallback.
+const EXTRACTOR_FACTORIES: readonly ExtractorFactory[] = [
+  () => new PdfExtractor(),
+  () => new YoutubeExtractor(),
+  () => new BilibiliExtractor(),
+  () => new FeedlyExtractor(),
+  () => new WebpageExtractor(),
+];
+
+export function createExtractorRegistry(): readonly ContentExtractor[] {
+  return EXTRACTOR_FACTORIES.map((create) => create());
 }
 
-export function selectExtractor(extractors: ContentExtractor[], context: PageContext): ContentExtractor {
+export function selectExtractor(extractors: readonly ContentExtractor[], context: PageContext): ContentExtractor {
   const extractor = extractors.find((candidate) => candidate.canHandle(context));
   if (!extractor) throw new AppError("unsupported-page", "当前页面类型暂不支持");
   return extractor;

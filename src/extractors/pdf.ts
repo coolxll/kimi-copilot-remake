@@ -1,12 +1,16 @@
 import { browser } from "wxt/browser";
 import { AppError } from "../domain/errors";
-import type { ContentExtractor } from "./extractor";
+import type { ContentExtractor, ExtractorDescriptor } from "./extractor";
 import type { ExtractedDocument, PageContext } from "../domain/types";
 import { safeFilename } from "../shared/filename";
 import { throwIfAborted } from "../shared/abort";
 
 export class PdfExtractor implements ContentExtractor {
-  readonly id = "pdf" as const;
+  readonly descriptor: ExtractorDescriptor = {
+    id: "pdf",
+    label: "PDF",
+    outputKind: "pdf",
+  };
 
   canHandle(context: PageContext): boolean {
     return /\.pdf(?:$|[?#])/i.test(context.url) || /arxiv\.org\/pdf\//i.test(context.url);

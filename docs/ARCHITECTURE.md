@@ -25,6 +25,12 @@ flowchart LR
 
 UI 只订阅任务状态。提取器不知道 Token、Prompt 或会话；Provider 不知道 React；应用编排只依赖 `SummaryProvider`。网页会话适配器只在登录/验证阶段使用目标页面，不从答案 DOM 取结果。
 
+## 提取器注册约束
+
+提取器的 `ExtractorDescriptor.id` 表示站点适配器身份，`outputKind` 表示最终生成的 `ExtractedDocument.kind`。两者必须保持独立：例如 Feedly 的身份是 `feedly`，但输出仍是 `webpage`。
+
+Registry 按明确顺序尝试提取器，专用站点适配器必须排在普通网页兜底之前。新增 URL/DOM 站点时，只需新增带 descriptor 的提取器、在 registry 中添加一条注册项，并补充 URL 路由与提取行为测试；不需要修改 `runSummary` 或 Provider。
+
 ## Provider 契约
 
 ```ts

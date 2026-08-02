@@ -3,7 +3,7 @@ import { AppError } from "../domain/errors";
 import type { ExtractedDocument, PageContext } from "../domain/types";
 import { safeFilename } from "../shared/filename";
 import { cleanHtmlForUpload, htmlToMarkdown, wrapHtml } from "./html";
-import type { ContentExtractor } from "./extractor";
+import type { ContentExtractor, ExtractorDescriptor } from "./extractor";
 import { fetchFeedlyEntry, parseFeedlyEntryId, type FeedlyEntryContent } from "../platform/chrome/feedly";
 
 const FEEDLY_MIN_TEXT = 80;
@@ -143,7 +143,11 @@ export function formatFeedlyList(
 }
 
 export class FeedlyExtractor implements ContentExtractor {
-  readonly id = "webpage" as const;
+  readonly descriptor: ExtractorDescriptor = {
+    id: "feedly",
+    label: "Feedly",
+    outputKind: "webpage",
+  };
 
   canHandle(context: PageContext): boolean {
     return isFeedlyArticleUrl(context.url);

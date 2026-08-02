@@ -8,7 +8,7 @@ import {
   stripYoutubeCaptionFormat,
   type YoutubeCaptionTrack,
 } from "../domain/youtube";
-import type { ContentExtractor } from "./extractor";
+import type { ContentExtractor, ExtractorDescriptor } from "./extractor";
 import type { ExtractedDocument, PageContext } from "../domain/types";
 import { safeFilename } from "../shared/filename";
 
@@ -62,7 +62,11 @@ export {
 export type { YoutubeCaptionTrack } from "../domain/youtube";
 
 export class YoutubeExtractor implements ContentExtractor {
-  readonly id = "youtube" as const;
+  readonly descriptor: ExtractorDescriptor = {
+    id: "youtube",
+    label: "YouTube",
+    outputKind: "youtube",
+  };
 
   canHandle(context: PageContext): boolean {
     return isYoutubePageUrl(context.url);

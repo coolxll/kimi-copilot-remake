@@ -1,13 +1,17 @@
 import { browser } from "wxt/browser";
 import { AppError } from "../domain/errors";
-import type { ContentExtractor } from "./extractor";
+import type { ContentExtractor, ExtractorDescriptor } from "./extractor";
 import type { ExtractedDocument, PageContext } from "../domain/types";
 import { safeFilename } from "../shared/filename";
 import { cleanHtmlForUpload, htmlToMarkdown, wrapHtml } from "./html";
 import { throwIfAborted } from "../shared/abort";
 
 export class WebpageExtractor implements ContentExtractor {
-  readonly id = "webpage" as const;
+  readonly descriptor: ExtractorDescriptor = {
+    id: "webpage",
+    label: "普通网页",
+    outputKind: "webpage",
+  };
 
   canHandle(): boolean {
     return true;

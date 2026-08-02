@@ -2,7 +2,7 @@ import { browser } from "wxt/browser";
 import { AppError } from "../domain/errors";
 import { parseBilibiliVideoUrl } from "../domain/bilibili";
 import type { BilibiliVideoRef } from "../domain/bilibili";
-import type { ContentExtractor } from "./extractor";
+import type { ContentExtractor, ExtractorDescriptor } from "./extractor";
 import type { ExtractedDocument, PageContext } from "../domain/types";
 import { requestBilibiliSubtitle, type BilibiliSubtitleFetchResponse } from "../platform/chrome/bilibili";
 import { safeFilename } from "../shared/filename";
@@ -32,7 +32,11 @@ export function formatBilibiliCommentSection(comments: string[]): string {
 }
 
 export class BilibiliExtractor implements ContentExtractor {
-  readonly id = "bilibili" as const;
+  readonly descriptor: ExtractorDescriptor = {
+    id: "bilibili",
+    label: "Bilibili",
+    outputKind: "bilibili",
+  };
 
   canHandle(context: PageContext): boolean {
     return Boolean(parseBilibiliVideoUrl(context.url));

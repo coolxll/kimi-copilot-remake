@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { browser } from "wxt/browser";
 import { AppError, toAppError } from "../../domain/errors";
 import type { DocumentKind, ExtractedDocument, PageContext } from "../../domain/types";
+import type { ExtractorDescriptor } from "../../extractors/extractor";
 import { createExtractorRegistry, selectExtractor } from "../../extractors/registry";
 import { ensurePageHostPermission } from "../../platform/chrome/permissions";
 import "../styles.css";
@@ -11,7 +12,7 @@ interface TestTab {
   title: string;
   url: string;
   active: boolean;
-  extractor: DocumentKind;
+  extractor: ExtractorDescriptor;
 }
 
 interface BrowserTab {
@@ -23,6 +24,7 @@ interface BrowserTab {
 }
 
 interface ExtractorTestResult {
+  extractor: ExtractorDescriptor;
   kind: DocumentKind;
   title: string;
   url: string;
@@ -30,7 +32,7 @@ interface ExtractorTestResult {
   warnings: string[];
 }
 
-const EXTRACTOR_LABELS: Record<DocumentKind, string> = {
+const DOCUMENT_KIND_LABELS: Record<DocumentKind, string> = {
   youtube: "YouTube",
   bilibili: "Bilibili",
   webpage: "普通网页",
@@ -115,10 +117,10 @@ export function ExtractorTestApp() {
       const context: PageContext = { tabId: tab.id, url: tab.url, title: tab.title };
       const extractor = selectExtractor(createExtractorRegistry(), context);
       const document = await extractor.extract(context, controller.signal);
-      setResult(toTestResult(document));
+      setResult(toTestResult(document, extractor.descriptor));
       setNotice(document.warnings.length
         ? { kind: "error", text: "提取完成，但存在 warning；请查看下方详情。" }
-        : { kind: "success", text: "提取成功：" + EXTRACTOR_LABELS[document.kind] });
+        : { kind: "success", text: `提取成功：${extractor.descriptor.label} → ${DOCUMENT_KIND_LABELS[document.kind]}` });
     } catch (error) {
       if (!controller.signal.aborted) setNotice({ kind: "error", text: toAppError(error).message });
     } finally {
@@ -133,7 +135,7 @@ export function ExtractorTestApp() {
   const selectedTab = tabs.find((tab) => tab.id === selectedTabId);
   return <main className="page test-page"><div className="panel">
     <header className="header">
-      <div><h1>提取器测试</h1><p className="muted">测试 YouTube、Bilibili、普通网页和 PDF 的实际提取结果；不读取或保存 Cookie。</p></div>
+      <div><h1>提取器测试</h1><p className="muted">测试 YouTube、Bilibili、Feedly、普通网页和 PDF 的实际提取结果；不读取或保存 Cookie。</p></div>
       <div className="header-actions"><button className="button" onClick={() => void browser.runtime.openOptionsPage()}>返回选项</button></div>
     </header>
 
@@ -144,10 +146,10 @@ export function ExtractorTestApp() {
         <button className="button" onClick={() => void scanTabs()} disabled={loadingTabs || running}>{loadingTabs ? "扫描中…" : "扫描已打开标签页"}</button>
         <select className="select" aria-label="测试页面" value={selectedTabId ? String(selectedTabId) : ""} onChange={(event) => { setSelectedTabId(Number(event.target.value) || undefined); setUrlInput(""); }} disabled={!tabs.length || running}>
           <option value="">选择页面</option>
-          {tabs.map((tab) => <option value={tab.id} key={tab.id}>[{EXTRACTOR_LABELS[tab.extractor]}] {tab.title}</option>)}
+          {tabs.map((tab) => <option value={tab.id} key={tab.id}>[{tab.extractor.label}] {tab.title}</option>)}
         </select>
       </div>
-      {selectedTab && <span className="tab-url">[{EXTRACTOR_LABELS[selectedTab.extractor]}] {selectedTab.url}</span>}
+      {selectedTab && <span className="tab-url">[{selectedTab.extractor.label}] {selectedTab.url}</span>}
       <div className="field">
         <label className="label" htmlFor="test-url">或输入 URL</label>
         <input id="test-url" className="input" value={urlInput} placeholder="https://... 或 file:///.../document.pdf" onChange={(event) => { setUrlInput(event.target.value); if (event.target.value.trim()) setSelectedTabId(undefined); }} disabled={running} />
@@ -158,7 +160,7 @@ export function ExtractorTestApp() {
     {notice && <div className={notice.kind === "success" ? "success" : "error"}>{notice.text}</div>}
     {result && <section className="card">
       <h2>提取结果</h2>
-      <p className="muted">类型：{EXTRACTOR_LABELS[result.kind]} · {result.title} · {result.output.length.toLocaleString()} 字符</p>
+      <p className="muted">站点：{result.extractor.label} · 输出：{DOCUMENT_KIND_LABELS[result.kind]} · {result.title} · {result.output.length.toLocaleString()} 字符</p>
       <span className="tab-url">{result.url}</span>
       {result.warnings.map((warning) => <div className="warning" key={warning}>{warning}</div>)}
       {result.output
@@ -181,9 +183,9 @@ function validateTestUrl(value: string): void {
   if (!isTestableUrl(value)) throw new AppError("unsupported-page", "测试地址必须是网页、PDF 或本地 file 地址");
 }
 
-function inferExtractor(url: string): DocumentKind {
+function inferExtractor(url: string): ExtractorDescriptor {
   const context: PageContext = { tabId: 0, url };
-  return selectExtractor(createExtractorRegistry(), context).id;
+  return selectExtractor(createExtractorRegistry(), context).descriptor;
 }
 
 async function waitForTabReady(tabId: number, signal: AbortSignal): Promise<BrowserTab> {
@@ -196,9 +198,9 @@ async function waitForTabReady(tabId: number, signal: AbortSignal): Promise<Brow
   throw new AppError("extraction-failed", "测试页面加载超时，请确认页面已打开");
 }
 
-function toTestResult(document: ExtractedDocument): ExtractorTestResult {
+function toTestResult(document: ExtractedDocument, extractor: ExtractorDescriptor): ExtractorTestResult {
   const output = document.kind === "youtube" ? extractYoutubeTranscript(document.sourceText) : document.sourceText;
-  return { kind: document.kind, title: document.title, url: document.sourceUrl, output, warnings: document.warnings };
+  return { extractor, kind: document.kind, title: document.title, url: document.sourceUrl, output, warnings: document.warnings };
 }
 
 function extractYoutubeTranscript(sourceText: string): string {
