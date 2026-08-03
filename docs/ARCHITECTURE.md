@@ -29,7 +29,13 @@ UI 只订阅任务状态。提取器不知道 Token、Prompt 或会话；Provide
 
 提取器的 `ExtractorDescriptor.id` 表示站点适配器身份，`outputKind` 表示最终生成的 `ExtractedDocument.kind`。两者必须保持独立：例如 Feedly 的身份是 `feedly`，但输出仍是 `webpage`。
 
-Registry 按明确顺序尝试提取器，专用站点适配器必须排在普通网页兜底之前。新增 URL/DOM 站点时，只需新增带 descriptor 的提取器、在 registry 中添加一条注册项，并补充 URL 路由与提取行为测试；不需要修改 `runSummary` 或 Provider。
+Registry 按明确顺序尝试提取器，专用站点适配器必须排在普通网页兜底之前。`canHandle` 负责便宜的 URL 判断；对 URL 形状通用的站点，registry 还会等待可取消的异步 `probe`，探测当前页面的 DOM 标记和同源 JSON，失败后继续普通网页。新增 URL/DOM 站点时，只需新增带 descriptor 的提取器、在 registry 中添加一条注册项，并补充 URL 路由与提取行为测试；不需要修改 `runSummary` 或 Provider。
+
+### 讨论站点提取
+
+Discourse 适配器支持根路径和子路径安装（例如 `/forum/t/...`），使用当前标签页 MAIN world 的 `credentials: include` 请求，不复制或保存 Cookie。短主题读取全部帖子；超过 50 个帖子时读取 Discourse 的原生 summary，再通过 `/t/{id}/posts.json` 补齐选中的帖子，并为热门且有回复的帖子调用 `/posts/{postId}/replies.json` 展开直接回复。最终按 `post_number` 排序，保留 `reply_to_post_number`，并在 200 个帖子 / 160,000 个讨论字符处停止，输出省略 warning。
+
+知乎适配器严格限定 `zhihu.com` 与 `www.zhihu.com` 的问题/回答路径。问题页默认展开前 5 个完整回答，每个回答读取 5 条顶层评论和每条 3 条回复；回答页读取完整回答、20 条顶层评论和每条 3 条回复。评论分页会校验仍属于当前回答，ID 以字符串处理，分页中断时保留已读取内容。
 
 ## Provider 契约
 
@@ -73,14 +79,15 @@ Kimi 适配层集中处理：refresh token、single-flight 刷新、一次 401 �
 - 设置：`chrome.storage.local` 的 `settings:v2`。
 - OpenAI Token：独立 key `secrets:openai-compatible:v1`，加载设置页时只显示“已配置”。
 - Kimi Token：兼容旧 key `local:kimi_tokens`。
-- ChatGPT Web：`local:web_session_credentials:v1` 只保存登录采集到的 access token 和采集时间；不读取或保存 Cookie、页面正文。DeepSeek 同一 key 只保存 `userToken` 和采集时间，后台用它换取的短时 access token 只在内存缓存；不读取或保存 Cookie。Gemini 同一 key 只保存账号索引/登录标记，`at/bl/f.sid` 每次请求刷新后只存在内存中。目标站点的 Cookie 始终由 Chrome Profile 管理。
+- ChatGPT Web：`local:web_session_credentials:v1` 只保存登录采集到的 access token 和采集时间；请求时从 Chrome Profile 读取 Cookie/oai-did，仅在本次请求内存中使用，不写入存储或日志，页面正文也不落盘。DeepSeek 同一 key 只保存 `userToken` 和采集时间，后台用它换取的短时 access token 只在内存缓存；不读取或保存 Cookie。Gemini 同一 key 只保存账号索引/登录标记，`at/bl/f.sid` 每次请求刷新后只存在内存中。目标站点的 Cookie 仍由 Chrome Profile 管理。
 - Web 会话后台通道：每个 runtime Port 有独立的 `AbortController`、request id 和 10 秒 heartbeat；侧边栏取消、关闭或切换 Provider 时发送 cancel，后台停止 fetch/SSE/WebSocket/PoW 请求。快照在 sidepanel 内以 Markdown 重新渲染，reasoning/thought 字段不映射到 UI。
-- 设置页 Web 会话状态：优先检查本地登录凭据；没有凭据时才对已打开的对应站点 Tab 执行只读 DOM 检查。不创建标签页、不提交 Prompt、不调用答案 DOM 读取逻辑。
+- 设置页 Web 会话状态：对已打开的对应站点 Tab 重新验证登录态；没有页面但存在本地凭据时显示“已保存、未验证”，不把本地标记直接视为在线。连接测试沿用生产 Web RPC 并发送固定测试 Prompt。
 - API Root 保存前校验协议并通过用户手势请求 `${origin}/*` 可选权限；修改 Root 后撤销旧 origin。
 - content script 不接触 Token；兼容请求从 sidepanel extension page 发起。
 - Bilibili 元数据与字幕请求由 background service worker 发起，固定声明 `api.bilibili.com` 和 `*.hdslb.com` host permissions，使用 `credentials: "include"` 获取站点会话能力；扩展不申请 `cookies` 权限、不读取或持久化 SESSDATA。已签名字幕资源使用 `credentials: "omit"`。
 - YouTube 字幕优先从当前标签页 MAIN world 的播放器状态和 Performance timeline 读取；没有字幕轨时回退到页面同源 InnerTube player 请求。字幕请求先复用页面已经带 PO Token 的 timedtext URL，再按 BiliNote/youtube-transcript-api 的去 `fmt` 方式和 yt-dlp 的 JSON3、SRV、TTML、SRT、WebVTT 格式尝试；当前 Web 字幕轨返回空内容时，先读取 YouTube 自己的 transcript 面板，再从页面会话请求 Android VR、iOS、TV、VisionOS 播放器客户端的备用字幕轨。同源请求使用 `credentials: "include"`，跨源签名字幕地址使用 `credentials: "omit"`。主流程不新增固定 YouTube host permission；选项页的提取器测试页仅在用户点击扫描/提取时请求选定目标页面的精确可选权限，不申请或保存站点 Cookie。
 - Gemini Web 总结 YouTube 时不经过字幕提取器：总结编排直接构造 YouTube 链接文档，Gemini Web RPC 提交视频 URL 和用户 Prompt，由 Gemini 自身处理视频内容；协议失败显示明确错误，不用页面答案 DOM 代答，其他 Provider 继续使用提取器结果。
+- Discourse/知乎同源 API 请求在标签页会话内执行；API 首次失败才退回普通 DOM 正文，后续评论或回复失败只产生 warning，不把不完整内容伪装成完整讨论。
 
 ## 失败分类
 

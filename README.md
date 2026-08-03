@@ -47,15 +47,19 @@ YouTube 字幕沿用 BiliNote 的人工字幕优先策略：从当前页面播�
 
 YouTube 页面默认使用 Gemini Web：扩展不等待字幕提取，直接把当前 YouTube URL 交给 Gemini 页面会话，由 Gemini 自己处理视频、字幕和可用内容；用户仍可在侧边栏临时切换到其他后端，Kimi、ChatGPT、DeepSeek 与兼容 API 切换后使用扩展提取结果。
 
-Gemini Web 的专用路径参考了 [Gemini Nexus](https://github.com/yeahhe365/Gemini-Nexus) 的逆向协议：每次后台请求先从 Gemini `/app` 获取短期 `at/bl/f.sid` 参数，再调用 `StreamGenerate` 并把累计 RPC 文本实时发送到侧栏。参数只在本次请求内存中存在，不写入扩展存储；这不是 Google 官方 API，协议可能随时漂移，失败会要求重新验证登录，不会回退 DOM 代答。
+Gemini Web 的专用路径参考了 [Gemini Nexus](https://github.com/yeahhe365/Gemini-Nexus) 的逆向协议：每次后台请求先从当前 Google 账号对应的 Gemini `/app` 获取短期 `at/bl/f.sid` 参数，再调用 `StreamGenerate` 并把累计 RPC 文本实时发送到侧栏。参数只在本次请求内存中存在，不写入扩展存储；这不是 Google 官方 API，协议可能随时漂移，失败会显示明确错误，不会回退 DOM 代答。
 
-选项页的“提取器测试”会打开独立诊断页；用户可以扫描已打开的 YouTube、Bilibili、普通网页和 PDF 标签页，也可以输入 URL 在新标签页中测试，直接查看实际提取到的正文、字幕和 warning。诊断页只在用户操作时请求目标页面的精确 origin 权限，不申请或保存站点 Cookie。
+选项页的“提取器测试”会打开独立诊断页；用户可以扫描已打开的 YouTube、Bilibili、Discourse、知乎、普通网页和 PDF 标签页，也可以输入 URL 在新标签页中测试，直接查看实际提取到的正文、讨论、评论和 warning。诊断页只在用户操作时请求目标页面的精确 origin 权限，不申请或保存站点 Cookie。
+
+Discourse 主题会在当前页面会话中读取主题 JSON。短主题完整读取帖子；长主题优先使用 Discourse 原生 `filter=summary` 的热门帖子，再为热门且有回复的帖子展开直接回复，最多 30 个回复线程，并以 200 个帖子 / 160,000 个讨论字符作为安全上限。知乎回答页读取回答正文、20 条顶层评论及每条 3 条回复；知乎问题页读取前 5 个完整回答，每个回答读取 5 条顶层评论及每条 3 条回复。接口分页、权限或站点结构变化时保留已读取内容并明确 warning。
 
 兼容端只承诺 Chat Completions 的文本子集：`POST <apiRoot>/chat/completions`，支持 SSE `data: {...}`、`[DONE]` 和服务商忽略 `stream` 时返回的普通 JSON。设置页的“测试连接”使用 `<apiRoot>/models`，404/405 仅提示不支持模型探测，不阻止保存。
 
-网页会话后端是实验性适配器，不调用各家公开 API，也不伪装成稳定 API。ChatGPT 通过缓存的 access token 在扩展后台调用 Web conversation SSE/WebSocket；DeepSeek 通过缓存的 `userToken` 换取短时 access token，再在后台执行会话创建、PoW 和 SSE；Gemini 通过后台 `credentials: include` 调用逆向 Web RPC。三者都保留原生会话并提供站点继续对话链接，原始 Markdown 会在生成过程中实时渲染。站点页面只用于首次登录或 WAF 验证，扩展不读取 Cookie、不自动填写 Prompt、不抓取 DOM 答案。站点登录失效、协议变化、PoW 或内容加载失败会显示明确错误。
+网页会话后端是实验性适配器，不调用各家公开 API，也不伪装成稳定 API。ChatGPT 通过缓存的 access token，并在每次请求时短暂读取当前 `chatgpt.com` Cookie/oai-did，在扩展后台调用 Web conversation SSE/WebSocket；Cookie 只存在请求内存，不写入扩展存储。DeepSeek 通过缓存的 `userToken` 换取短时 access token，再在后台执行会话创建、PoW 和 SSE；Gemini 通过后台 `credentials: include` 调用逆向 Web RPC。三者都保留原生会话并提供站点继续对话链接，原始 Markdown 会在生成过程中实时渲染。站点页面只用于首次登录或 WAF 验证，扩展不自动填写 Prompt、不抓取 DOM 答案。站点登录失效、协议变化、PoW 或内容加载失败会显示明确错误。
 
-设置页的 Web 会话状态仅对已打开的对应站点页面执行只读 DOM 检查；检测到输入区或会话 UI 时显示“当前页面检测到已登录”，不会创建标签页、发送 Prompt 或保存 Token。
+设置页的 Web 会话状态会优先对已打开页面重新读取当前登录态；已保存但没有可验证页面时显示“已保存登录态，尚未实时验证”，不会把过期标记直接当成在线。
+
+设置页还提供每个 Provider 独立的连接测试按钮。ChatGPT、Gemini 和 DeepSeek 会沿用正式 Web 会话链路发送 `只回复 PROJECT_OK`，确认真实会话可用并返回原生会话链接；该测试会在对应账号创建测试会话。Kimi 和兼容端仍使用各自的只读鉴权/模型探测。
 
 ## 目录
 
@@ -63,7 +67,7 @@ Gemini Web 的专用路径参考了 [Gemini Nexus](https://github.com/yeahhe365/
 entrypoints/                 WXT background、sidepanel、options、提取器测试页
 src/domain/                  Provider、文档、设置和错误契约
 src/application/             任务状态机与总结用例编排
-src/extractors/              网页、Bilibili、YouTube、PDF.js 提取器
+src/extractors/              网页、Bilibili、YouTube、Discourse、知乎、PDF.js 提取器
 src/integrations/kimi/       Kimi 登录态、Token 刷新、上传和 SSE
 src/integrations/openai-compatible/
                              兼容 API、SSE、重试和分块归并
