@@ -19,30 +19,33 @@ export async function runSummary(
   context: PageContext,
   signal: AbortSignal,
   dispatch: (action: TaskAction) => void,
-): Promise<void> {
+): Promise<ExtractedDocument | undefined> {
   dispatch({ type: "start", provider: providerId });
+  let document: ExtractedDocument | undefined;
   try {
     const provider = await services.getProvider(providerId);
     await provider.validateReady();
     dispatch({ type: "phase", phase: "extracting" });
-    const document = providerId === "gemini-web" && isYoutubePageUrl(context.url)
+    document = providerId === "gemini-web" && isYoutubePageUrl(context.url)
       ? createDirectYoutubeDocument(context)
-      : await selectExtractor(services.extractors, context).extract(context, signal);
+      : await (await selectExtractor(services.extractors, context, signal)).extract(context, signal);
     const settings = await services.storage.getSettings();
     const prompt = settings.promptOverride?.trim() || DEFAULT_PROMPT;
     for await (const event of provider.summarize({ document, prompt }, signal)) dispatchEvent(event, dispatch);
+    return document;
   } catch (error) {
     const appError = toAppError(error);
-    if (appError.code === "cancelled" || (signal.aborted && appError.code === "api-unavailable")) return;
+    if (appError.code === "cancelled" || (signal.aborted && appError.code === "api-unavailable")) return document;
     if (appError.code === "auth-required" || appError.code === "token-refresh-failed") {
       dispatch({ type: "auth-required", message: appError.message });
-      return;
+      return document;
     }
     if (appError.code === "provider-not-configured" || appError.code === "host-permission-denied") {
       dispatch({ type: "provider-not-configured", message: appError.message });
-      return;
+      return document;
     }
     dispatch({ type: "error", error: appError });
+    return document;
   }
 }
 

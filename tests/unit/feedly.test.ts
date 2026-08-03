@@ -61,13 +61,13 @@ describe("Feedly article URL detection", () => {
     expect(parseFeedlyEntryId("https://feedly.com/i/my/me?s=entry:G%2FGX%2Fk%3D_demo:part")).toBe("G/GX/k=_demo:part");
   });
 
-  it("routes Feedly entry pages to the dedicated extractor", () => {
-    const extractor = selectExtractor(createExtractorRegistry(), {
+  it("routes Feedly entry pages to the dedicated extractor", async () => {
+    const extractor = await selectExtractor(createExtractorRegistry(), {
       tabId: 1,
       url: "https://feedly.com/i/my/me?s=entry:G%2Fexample",
     });
     expect(extractor).toBeInstanceOf(FeedlyExtractor);
-    expect(selectExtractor(createExtractorRegistry(), {
+    expect(await selectExtractor(createExtractorRegistry(), {
       tabId: 1,
       url: "https://feedly.com/i/my/me",
     })).toBeInstanceOf(FeedlyExtractor);

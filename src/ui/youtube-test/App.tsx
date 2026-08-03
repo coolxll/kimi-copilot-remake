@@ -56,15 +56,15 @@ export function ExtractorTestApp() {
     setNotice(undefined);
     try {
       const allTabs = await browser.tabs.query({});
-      const testTabs = allTabs
+      const testTabs = await Promise.all(allTabs
         .filter((tab): tab is typeof tab & { id: number; url: string } => Boolean(tab.id && tab.url && isTestableUrl(tab.url)))
-        .map((tab) => ({
+        .map(async (tab) => ({
           id: tab.id,
           title: tab.title || tab.url,
           url: tab.url,
           active: Boolean(tab.active),
-          extractor: inferExtractor(tab.url),
-        }));
+          extractor: await inferExtractor({ tabId: tab.id, url: tab.url, title: tab.title }),
+        })));
       setTabs(testTabs);
       setSelectedTabId((current) => testTabs.some((tab) => tab.id === current)
         ? current
@@ -115,7 +115,7 @@ export function ExtractorTestApp() {
       }
       await ensurePageHostPermission(tab.url);
       const context: PageContext = { tabId: tab.id, url: tab.url, title: tab.title };
-      const extractor = selectExtractor(createExtractorRegistry(), context);
+      const extractor = await selectExtractor(createExtractorRegistry(), context, controller.signal);
       const document = await extractor.extract(context, controller.signal);
       setResult(toTestResult(document, extractor.descriptor));
       setNotice(document.warnings.length
@@ -135,7 +135,7 @@ export function ExtractorTestApp() {
   const selectedTab = tabs.find((tab) => tab.id === selectedTabId);
   return <main className="page test-page"><div className="panel">
     <header className="header">
-      <div><h1>提取器测试</h1><p className="muted">测试 YouTube、Bilibili、Feedly、普通网页和 PDF 的实际提取结果；不读取或保存 Cookie。</p></div>
+      <div><h1>提取器测试</h1><p className="muted">测试 YouTube、Bilibili、Feedly、Discourse、知乎、普通网页和 PDF 的实际提取结果；不读取或保存 Cookie。</p></div>
       <div className="header-actions"><button className="button" onClick={() => void browser.runtime.openOptionsPage()}>返回选项</button></div>
     </header>
 
@@ -183,9 +183,8 @@ function validateTestUrl(value: string): void {
   if (!isTestableUrl(value)) throw new AppError("unsupported-page", "测试地址必须是网页、PDF 或本地 file 地址");
 }
 
-function inferExtractor(url: string): ExtractorDescriptor {
-  const context: PageContext = { tabId: 0, url };
-  return selectExtractor(createExtractorRegistry(), context).descriptor;
+async function inferExtractor(context: PageContext): Promise<ExtractorDescriptor> {
+  return (await selectExtractor(createExtractorRegistry(), context)).descriptor;
 }
 
 async function waitForTabReady(tabId: number, signal: AbortSignal): Promise<BrowserTab> {
