@@ -59,6 +59,8 @@ button { cursor: pointer; }
 .error { color: #dc2626; background: #fee2e2; border-radius: 7px; padding: 10px; font-size: 13px; }
 .warning { color: #92400e; background: #fef3c7; border-radius: 7px; padding: 8px 10px; font-size: 12px; margin: 8px 0; }
 .success { color: #166534; background: #dcfce7; border-radius: 7px; padding: 8px 10px; font-size: 12px; }
+.connectivity-status { display: inline-flex; align-items: center; max-width: min(460px, 100%); font-size: 12px; overflow-wrap: anywhere; }
+.connectivity-status.success, .connectivity-status.error { padding: 0; background: transparent; border-radius: 0; }
 .markdown { line-height: 1.65; font-size: 14px; overflow-wrap: anywhere; }
 .markdown table { width: 100%; border-collapse: collapse; display: block; overflow-x: auto; }
 .markdown th, .markdown td { border: 1px solid #d1d5db; padding: 5px 7px; text-align: left; }
@@ -112,6 +114,10 @@ button { cursor: pointer; }
 .sidepanel-page .provider-button { gap: 6px; }
 .sidepanel-page .output-provider, .sidepanel-page .current-provider { gap: 4px; }
 .sidepanel-page .warning { margin: 10px 0; }
+.sidepanel-page .repurpose-block { margin-top: 22px; padding-top: 16px; border-top: 1px solid #dbe1ec; }
+.sidepanel-page .repurpose-heading { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; font-size: 13px; font-weight: 700; }
+.sidepanel-page .repurpose-block > .muted { margin: 8px 0 12px; }
+.sidepanel-page .repurpose-actions { justify-content: flex-start; }
 @media (prefers-color-scheme: dark) {
   .provider-picker-menu { background: #1f2937; border-color: #4b5563; }
   .provider-picker-option { color: #f3f4f6; }
@@ -121,5 +127,6 @@ button { cursor: pointer; }
   .sidepanel-page .actions .button, .sidepanel-page .actions a.button, .sidepanel-page .toolbar > .button, .sidepanel-page .markdown a { color: #82aaff; }
   .sidepanel-page .actions .icon-button { color: #a7b1c2; }
   .sidepanel-page .actions .icon-button:hover { color: #a9c4ff; background: #343a4a; border-color: #49536a; }
+  .sidepanel-page .repurpose-block { border-top-color: #454957; }
 }
 @keyframes spin { to { transform: rotate(360deg); } }

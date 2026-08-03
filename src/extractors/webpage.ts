@@ -5,6 +5,7 @@ import type { ExtractedDocument, PageContext } from "../domain/types";
 import { safeFilename } from "../shared/filename";
 import { cleanHtmlForUpload, htmlToMarkdown, wrapHtml } from "./html";
 import { throwIfAborted } from "../shared/abort";
+import { extractImageUrls, uniqueImageUrls } from "../shared/image-links";
 
 export class WebpageExtractor implements ContentExtractor {
   readonly descriptor: ExtractorDescriptor = {
@@ -19,7 +20,7 @@ export class WebpageExtractor implements ContentExtractor {
 
   async extract(context: PageContext, signal: AbortSignal): Promise<ExtractedDocument> {
     throwIfAborted(signal);
-    let page: { title: string; html: string; text: string } | undefined;
+    let page: { title: string; html: string; text: string; imageUrls: string[] } | undefined;
     try {
       const result = await browser.scripting.executeScript({
         target: { tabId: context.tabId },
@@ -27,6 +28,13 @@ export class WebpageExtractor implements ContentExtractor {
           title: document.title,
           html: document.body?.outerHTML ?? "",
           text: document.body?.innerText ?? "",
+          imageUrls: Array.from(document.images).flatMap((image) => [
+            image.currentSrc,
+            image.src,
+            image.getAttribute("data-src"),
+            image.getAttribute("data-original"),
+            image.getAttribute("data-lazy-src"),
+          ]).filter((value): value is string => Boolean(value)),
         }),
       });
       page = result[0]?.result;
@@ -45,6 +53,7 @@ export class WebpageExtractor implements ContentExtractor {
         title,
         sourceUrl: context.url,
         sourceText: "",
+        imageUrls: uniqueImageUrls(page.imageUrls, context.url),
         warnings: ["网页没有可读取的正文"],
       };
     }
@@ -54,6 +63,10 @@ export class WebpageExtractor implements ContentExtractor {
       title,
       sourceUrl: context.url,
       sourceText: markdown,
+      imageUrls: uniqueImageUrls([
+        ...page.imageUrls,
+        ...extractImageUrls(markdown, context.url),
+      ], context.url),
       uploadFile,
       warnings: [],
     };
