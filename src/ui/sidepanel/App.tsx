@@ -163,11 +163,21 @@ export function SidePanelApp() {
     downloadTextFile(`${safeFilename(title, "repurpose")}-小红书.md`, repurpose.markdown);
   };
 
+  const copyRepurpose = async () => {
+    if (repurpose.status !== "success") return;
+    try {
+      await copyMarkdownToClipboard(repurpose.markdown);
+      setRepurposeNotice("Markdown 已复制");
+    } catch (error) {
+      setRepurposeNotice(`无法复制 Markdown：${toAppError(error).message}。可改用下载文件。`);
+    }
+  };
+
   const openMd2Card = async () => {
     if (repurpose.status !== "success") return;
     let copied = false;
     try {
-      await navigator.clipboard.writeText(repurpose.markdown);
+      await copyMarkdownToClipboard(repurpose.markdown);
       copied = true;
     } catch (error) {
       setRepurposeNotice(`无法自动复制 Markdown：${toAppError(error).message}。已尝试打开编辑器，可改用下载文件。`);
@@ -232,9 +242,12 @@ export function SidePanelApp() {
           <Markdown content={repurpose.markdown} />
           {repurpose.warnings.map((warning) => <div className="warning" key={warning}>{warning}</div>)}
           <div className="actions repurpose-actions">
-            <button className="button" onClick={downloadRepurpose}>下载 Markdown</button>
-            <button className="button primary" onClick={() => void openMd2Card()}>复制并打开 md2card</button>
-            <button className="button" onClick={() => void generateRepurposeContent()}>重新生成</button>
+            <div className="action-group">
+              <IconButton icon="download" label="下载 Markdown" onClick={downloadRepurpose} />
+              <IconButton icon="copy" label="复制 Markdown" onClick={() => void copyRepurpose()} />
+              <IconButton icon="external" label="复制并打开 md2card" onClick={() => void openMd2Card()} />
+            </div>
+            <IconButton icon="refresh" label="重新生成" onClick={() => void generateRepurposeContent()} />
           </div>
           {repurpose.imageUrls.length > 0 && <p className="muted">已带入 {repurpose.imageUrls.length} 个真实图片链接；导出 ZIP 前请在 md2card 预览中检查图片是否可访问。</p>}
           <p className="muted">打开后粘贴 Markdown，检查长图文分卡和图片，再点击 md2card 的导出功能生成图片 ZIP。</p>
@@ -257,17 +270,31 @@ function Markdown({ content }: { content: string }) {
   return <div className="markdown"><ReactMarkdown remarkPlugins={[remarkGfm]}>{content}</ReactMarkdown></div>;
 }
 
-function IconButton({ icon, label, onClick }: { icon: "copy" | "refresh"; label: string; onClick: () => void }) {
+function IconButton({ icon, label, onClick }: { icon: "copy" | "download" | "external" | "refresh"; label: string; onClick: () => void | Promise<void> }) {
   return <button className="button icon-button" type="button" onClick={onClick} aria-label={label} title={label}>
     <Icon name={icon} />
   </button>;
 }
 
-function Icon({ name }: { name: "copy" | "refresh" }) {
+function Icon({ name }: { name: "copy" | "download" | "external" | "refresh" }) {
   if (name === "copy") {
     return <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
       <rect x="8" y="8" width="11" height="11" rx="2" />
       <path d="M16 8V6a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v8a2 2 0 0 0 2 2h2" />
+    </svg>;
+  }
+  if (name === "download") {
+    return <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+      <path d="M12 3v12" />
+      <path d="m7 10 5 5 5-5" />
+      <path d="M5 21h14" />
+    </svg>;
+  }
+  if (name === "external") {
+    return <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+      <path d="M14 5h5v5" />
+      <path d="m19 5-9 9" />
+      <path d="M19 13v5a1 1 0 0 1-1 1H6a1 1 0 0 1-1-1V6a1 1 0 0 1 1-1h5" />
     </svg>;
   }
   return <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
@@ -313,6 +340,40 @@ function downloadTextFile(filename: string, content: string): void {
   link.download = filename;
   link.click();
   window.setTimeout(() => URL.revokeObjectURL(href), 0);
+}
+
+async function copyMarkdownToClipboard(content: string): Promise<void> {
+  let clipboardError: unknown;
+  if (navigator.clipboard?.writeText) {
+    try {
+      await navigator.clipboard.writeText(content);
+      return;
+    } catch (error) {
+      clipboardError = error;
+    }
+  }
+
+  const textarea = document.createElement("textarea");
+  textarea.value = content;
+  textarea.setAttribute("readonly", "");
+  textarea.style.position = "fixed";
+  textarea.style.top = "0";
+  textarea.style.left = "0";
+  textarea.style.opacity = "0";
+  textarea.style.pointerEvents = "none";
+  document.body.appendChild(textarea);
+  const copied = (() => {
+    try {
+      textarea.focus();
+      textarea.select();
+      return document.execCommand("copy");
+    } finally {
+      textarea.remove();
+    }
+  })();
+  if (!copied) {
+    throw clipboardError instanceof Error ? clipboardError : new Error("浏览器拒绝访问剪贴板");
+  }
 }
 
 function useReducerCompat(): [TaskState, typeof dispatch] {
