@@ -9,6 +9,13 @@ import { WebSessionClient } from "../integrations/web-session/client";
 import { WebSessionProvider } from "../integrations/web-session/provider";
 import { createSettingsRepository, type SettingsRepository } from "../platform/chrome/storage";
 
+export interface ProviderConnectionResult {
+  ok: boolean;
+  message: string;
+  models?: string[];
+  externalUrl?: string;
+}
+
 export interface AppServices {
   storage: SettingsRepository;
   auth: KimiAuthService;
@@ -16,6 +23,14 @@ export interface AppServices {
   extractors: ReturnType<typeof createExtractorRegistry>;
   getProvider(providerId: ProviderId): Promise<SummaryProvider>;
   testOpenAIConnection(config: OpenAICompatibleConfig, secret: OpenAICompatibleSecret | null): Promise<TestConnectionResult>;
+  testProviderConnection(
+    providerId: ProviderId,
+    options?: {
+      config?: OpenAICompatibleConfig;
+      secret?: OpenAICompatibleSecret | null;
+      signal?: AbortSignal;
+    },
+  ): Promise<ProviderConnectionResult>;
 }
 
 export function createAppServices(): AppServices {
@@ -38,6 +53,19 @@ export function createAppServices(): AppServices {
     },
     async testOpenAIConnection(config, secret) {
       return new OpenAICompatibleProvider({ config, secret }).testConnection();
+    },
+    async testProviderConnection(providerId, options = {}) {
+      if (providerId === "kimi-web") return new KimiProvider(storage).testConnection(options.signal);
+      if (isWebSessionProvider(providerId)) return webSessions.testConnection(providerId, options.signal);
+      let config = options.config;
+      let secret = options.secret;
+      if (!config) {
+        const settings = await storage.getSettings();
+        config = settings.openAICompatible;
+        if (!config) throw new AppError("provider-not-configured", "兼容 API 尚未配置");
+      }
+      if (secret === undefined) secret = await storage.getOpenAISecret();
+      return new OpenAICompatibleProvider({ config, secret: secret ?? null }).testConnection();
     },
   };
 }

@@ -21,4 +21,18 @@ describe("KimiClient token refresh", () => {
     expect(refreshCalls).toBe(1);
     expect(onTokensRefreshed).toHaveBeenCalledTimes(1);
   });
+
+  it("probes connectivity by refreshing tokens without creating a chat", async () => {
+    const fetchMock = vi.fn(async (input: string | URL | Request) => {
+      expect(String(input)).toContain("/api/auth/token/refresh");
+      return new Response(JSON.stringify({ access_token: "access", refresh_token: "rotated" }), { status: 200 });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const onTokensRefreshed = vi.fn(async () => undefined);
+
+    await new KimiClient({ tokens: { refreshToken: "refresh" }, onTokensRefreshed }).testConnection();
+
+    expect(fetchMock).toHaveBeenCalledOnce();
+    expect(onTokensRefreshed).toHaveBeenCalledWith({ accessToken: "access", refreshToken: "rotated" });
+  });
 });

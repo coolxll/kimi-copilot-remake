@@ -107,6 +107,6 @@ function isWebSessionCredential(value: unknown, providerId: WebSessionProviderId
   const record = value as Record<string, unknown>;
   if (record.providerId !== providerId || typeof record.capturedAt !== "number") return false;
   if (providerId === "chatgpt-web") return typeof record.accessToken === "string" && record.accessToken.length > 0;
-  if (providerId === "gemini-web") return typeof record.authUser === "string";
+  if (providerId === "gemini-web") return typeof record.authUser === "string" && /^\d+$/.test(record.authUser);
   return typeof record.userToken === "string" && record.userToken.length > 0;
 }

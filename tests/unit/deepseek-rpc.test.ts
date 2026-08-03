@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { buildDeepSeekPowResponse } from "../../src/integrations/web-session/deepseek-pow";
-import { buildDeepSeekCompletionRequest, streamDeepSeekWebRpc } from "../../src/integrations/web-session/deepseek-rpc";
+import { buildDeepSeekCompletionRequest, streamDeepSeekWebRpc, testDeepSeekWebConnection } from "../../src/integrations/web-session/deepseek-rpc";
 
 function streamFrom(text: string): ReadableStream<Uint8Array> {
   return new ReadableStream({
@@ -21,6 +21,19 @@ describe("DeepSeek Web RPC", () => {
     expect((request.init.headers as Record<string, string>).Authorization).toBe("Bearer access-token-1");
     expect((request.init.headers as Record<string, string>)["x-ds-pow-response"]).toBe("pow-1");
     expect(body).toMatchObject({ chat_session_id: "session-1", parent_message_id: null, prompt: "PROJECT_OK", thinking_enabled: false });
+  });
+
+  it("probes the account endpoint without creating a chat session", async () => {
+    const fetchMock = vi.fn(async (_input: RequestInfo | URL, _init?: RequestInit) => new Response(JSON.stringify({
+      code: 0,
+      data: { biz_data: { token: "access-token-1" } },
+    }), { status: 200 }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(testDeepSeekWebConnection({ userToken: "user-token-1" }, new AbortController().signal))
+      .resolves.toBeUndefined();
+    expect(fetchMock).toHaveBeenCalledOnce();
+    expect(fetchMock.mock.calls[0][0]).toBe("https://chat.deepseek.com/api/v0/users/current");
   });
 
   it("builds the signed PoW response without network access", async () => {

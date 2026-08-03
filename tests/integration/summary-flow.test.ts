@@ -23,6 +23,7 @@ function makeServices(provider: SummaryProvider, extract: ExtractFn = vi.fn(asyn
     }],
     getProvider: vi.fn(async () => provider),
     testOpenAIConnection: vi.fn(async () => ({ ok: true, message: "ok" })),
+    testProviderConnection: vi.fn(async () => ({ ok: true, message: "ok" })),
   };
 }
 

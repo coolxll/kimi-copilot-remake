@@ -21,6 +21,15 @@ export class KimiClient {
     this.onTokensRefreshed = options.onTokensRefreshed;
   }
 
+  /**
+   * Refresh the current token without creating a chat or sending a prompt.
+   * The refresh endpoint is the only non-mutating authenticated probe exposed
+   * by the Kimi web client and also keeps a rotated refresh token current.
+   */
+  async testConnection(signal?: AbortSignal): Promise<void> {
+    await withAbort(this.refreshAccessToken(), signal);
+  }
+
   async createChat(signal?: AbortSignal): Promise<{ id: string }> {
     const body = await this.requestJson<{ id?: string }>("/api/chat", {
       method: "POST",

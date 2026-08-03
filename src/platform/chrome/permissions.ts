@@ -76,6 +76,17 @@ export async function hasPageHostPermission(value: string): Promise<boolean> {
   return browser.permissions.contains({ origins: [permissionOrigin(url)] });
 }
 
+export async function ensureChatGptCookiePermission(): Promise<void> {
+  try {
+    if (await browser.permissions.contains({ permissions: ["cookies"] })) return;
+    const granted = await browser.permissions.request({ permissions: ["cookies"] });
+    if (!granted) throw new AppError("host-permission-denied", "未授权读取 ChatGPT 当前会话，无法复用登录态");
+  } catch (error) {
+    if (error instanceof AppError) throw error;
+    throw new AppError("host-permission-denied", "无法申请 ChatGPT 会话权限", { cause: error });
+  }
+}
+
 function parsePageUrl(value: string): URL {
   try {
     return new URL(value);

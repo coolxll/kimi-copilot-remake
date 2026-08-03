@@ -13,3 +13,9 @@ payload SHA-256 is:
 `b3fca8cc072c1defbd60c02266a8e48bd307a1804aaff4314900aea720e72f7d`
 
 Copyright (c) 2026 !(Not Sumit).
+
+## js-sha3
+
+The ChatGPT Web Sentinel Proof-of-Work implementation uses
+[js-sha3](https://github.com/emn178/js-sha3), version 0.9.3, distributed
+under the MIT License.

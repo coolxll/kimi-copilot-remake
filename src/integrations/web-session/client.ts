@@ -2,7 +2,7 @@ import { browser } from "wxt/browser";
 import { AppError } from "../../domain/errors";
 import type { WebSessionCredential, WebSessionProviderId } from "../../domain/types";
 import type { SettingsRepository } from "../../platform/chrome/storage";
-import { ensurePageHostPermission, hasPageHostPermission } from "../../platform/chrome/permissions";
+import { ensureChatGptCookiePermission, ensurePageHostPermission, hasPageHostPermission } from "../../platform/chrome/permissions";
 import { abortableDelay, throwIfAborted, withAbort } from "../../shared/abort";
 import { WEB_SESSION_PORT_NAME, type WebSessionPortMessage } from "./messages";
 import { getWebSessionSpec } from "./specs";
@@ -15,7 +15,7 @@ interface BrowserTab {
   lastAccessed?: number;
 }
 
-export type WebSessionLoginStatus = "logged-in" | "logged-out" | "no-page" | "permission-required" | "unknown";
+export type WebSessionLoginStatus = "logged-in" | "page-logged-in" | "logged-out" | "saved-unverified" | "no-page" | "permission-required" | "unknown";
 
 export type WebSessionStreamEvent =
   | { type: "snapshot"; text: string }
@@ -32,6 +32,7 @@ export class WebSessionClient {
   async openLogin(providerId: WebSessionProviderId, timeoutMs = 120_000, signal?: AbortSignal): Promise<void> {
     if (signal) throwIfAborted(signal);
     const spec = getWebSessionSpec(providerId);
+    if (providerId === "chatgpt-web") await ensureChatGptCookiePermission();
     await ensurePageHostPermission(spec.loginUrl);
     const existing = await this.findProviderTab(providerId);
     const created = existing?.id === undefined;
@@ -73,18 +74,83 @@ export class WebSessionClient {
     if (!(await hasPageHostPermission(spec.loginUrl))) {
       throw new AppError("auth-required", `请先点击“登录 ${spec.label}”，授权复用当前浏览器会话`);
     }
-    if (!(await this.storage.getWebSessionCredential(providerId))) {
-      throw new AppError("auth-required", `请先登录 ${spec.label}`);
-    }
+    await this.ensureCredential(providerId);
+  }
+
+  async testConnection(providerId: WebSessionProviderId, signal?: AbortSignal): Promise<{ ok: true; message: string; externalUrl?: string }> {
+    await this.validateReady(providerId);
+    if (providerId === "chatgpt-web") await ensureChatGptCookiePermission();
+    const activeSignal = signal ?? new AbortController().signal;
+    throwIfAborted(activeSignal);
+    const port = browser.runtime.connect({ name: WEB_SESSION_PORT_NAME });
+    const requestId = generateRequestId();
+    return new Promise<{ ok: true; message: string; externalUrl?: string }>((resolve, reject) => {
+      let settled = false;
+      const cleanup = () => {
+        activeSignal.removeEventListener("abort", onAbort);
+        port.onMessage.removeListener(onMessage);
+        port.onDisconnect.removeListener(onDisconnect);
+        port.disconnect();
+      };
+      const finish = (callback: () => void) => {
+        if (settled) return;
+        settled = true;
+        cleanup();
+        callback();
+      };
+      const onMessage = (message: WebSessionPortMessage) => {
+        if (!message || message.requestId !== requestId) return;
+        if (message.type === "done") {
+          finish(() => resolve({
+            ok: true,
+            message: message.message || `${getWebSessionSpec(providerId).label} 连通性正常`,
+            ...(message.externalUrl ? { externalUrl: message.externalUrl } : {}),
+          }));
+        } else if (message.type === "error") {
+          finish(() => reject(new AppError(message.error.code, message.error.message, { retryable: message.error.retryable })));
+        }
+      };
+      const onDisconnect = () => finish(() => reject(new AppError("api-unavailable", "网页协议后台连接已断开", { retryable: true })));
+      const onAbort = () => {
+        try {
+          port.postMessage({ type: "cancel", requestId });
+        } catch {
+          // The background port may already be gone while the test is aborted.
+        }
+        finish(() => reject(activeSignal.reason ?? new DOMException("Aborted", "AbortError")));
+      };
+      port.onMessage.addListener(onMessage);
+      port.onDisconnect.addListener(onDisconnect);
+      activeSignal.addEventListener("abort", onAbort, { once: true });
+      try {
+        port.postMessage({ type: "test", requestId, providerId });
+      } catch (error) {
+        finish(() => reject(error));
+      }
+    });
   }
 
   async detectLoginStatus(providerId: WebSessionProviderId): Promise<WebSessionLoginStatus> {
     try {
       const spec = getWebSessionSpec(providerId);
       if (!(await hasPageHostPermission(spec.loginUrl))) return "permission-required";
-      if (await this.storage.getWebSessionCredential(providerId)) return "logged-in";
+      const credential = await this.storage.getWebSessionCredential(providerId);
       const tab = await this.findProviderTab(providerId);
-      if (typeof tab?.id !== "number" || !isTabForOrigin(tab.url, spec.origin)) return "no-page";
+      if (typeof tab?.id !== "number" || !isTabForOrigin(tab.url, spec.origin)) return credential ? "saved-unverified" : "no-page";
+      if (credential) {
+        const capture = await captureWebSessionCredentialWithRetry(tab.id, providerId);
+        if (capture?.status === "ok") {
+          await this.storage.saveWebSessionCredential(capture.credential);
+          return "logged-in";
+        }
+        if (capture?.status === "logged-out") return "logged-out";
+        return "unknown";
+      }
+      const capture = await captureWebSessionCredentialWithRetry(tab.id, providerId);
+      if (capture.status === "ok") {
+        await this.storage.saveWebSessionCredential(capture.credential);
+        return "logged-in";
+      }
       const result = await browser.scripting.executeScript({
         target: { tabId: tab.id },
         world: "MAIN",
@@ -92,13 +158,15 @@ export class WebSessionClient {
         args: [providerId],
       });
       const status = (result[0]?.result as { status?: unknown } | undefined)?.status;
-      return status === "logged-in" || status === "logged-out" || status === "unknown" ? status : "unknown";
+      if (status === "logged-in") return "page-logged-in";
+      return status === "logged-out" || status === "unknown" ? status : "unknown";
     } catch {
       return "unknown";
     }
   }
 
   async *stream(providerId: WebSessionProviderId, prompt: string, signal: AbortSignal): AsyncIterable<WebSessionStreamEvent> {
+    if (providerId === "chatgpt-web") await ensureChatGptCookiePermission();
     await this.validateReady(providerId);
     if (signal.aborted) throw signal.reason ?? new DOMException("Aborted", "AbortError");
     const port = browser.runtime.connect({ name: WEB_SESSION_PORT_NAME });
@@ -147,7 +215,8 @@ export class WebSessionClient {
     const spec = getWebSessionSpec(providerId);
     let tabs: BrowserTab[];
     try {
-      tabs = await browser.tabs.query({}) as unknown as BrowserTab[];
+      const result = await browser.tabs.query({});
+      tabs = Array.isArray(result) ? result as unknown as BrowserTab[] : [];
     } catch {
       return undefined;
     }
@@ -157,6 +226,44 @@ export class WebSessionClient {
         if (left.active !== right.active) return left.active ? -1 : 1;
         return (right.lastAccessed ?? 0) - (left.lastAccessed ?? 0);
       })[0];
+  }
+
+  private async ensureCredential(providerId: WebSessionProviderId): Promise<WebSessionCredential> {
+    const saved = await this.storage.getWebSessionCredential(providerId);
+    if (saved) return saved;
+
+    const spec = getWebSessionSpec(providerId);
+    const tab = await this.findProviderTab(providerId);
+    if (typeof tab?.id !== "number" || !isTabForOrigin(tab.url, spec.origin)) {
+      throw new AppError(
+        "auth-required",
+        `请先登录 ${spec.label}：扩展未保存登录凭据，也未找到已打开的 ${spec.label} 页面。点击“登录 ${spec.label}”完成采集后再重试`,
+        { retryable: true },
+      );
+    }
+
+    let capture: CaptureResult;
+    try {
+      capture = await captureWebSessionCredentialWithRetry(tab.id, providerId);
+    } catch (error) {
+      throw new AppError("api-contract", describeCaptureError(error, spec.label), { cause: error, retryable: true });
+    }
+    if (capture.status === "ok") {
+      await this.storage.saveWebSessionCredential(capture.credential);
+      return capture.credential;
+    }
+    if (capture.status === "logged-out") {
+      throw new AppError(
+        "auth-required",
+        `${spec.label} 当前页面未返回可用登录凭据，请在页面完成登录后点击“更新 ${spec.label}”重试`,
+        { retryable: true },
+      );
+    }
+    throw new AppError(
+      "api-contract",
+      `${spec.label} 登录凭据采集失败：${capture.message}。请保持页面打开并点击“更新 ${spec.label}”重试`,
+      { retryable: true },
+    );
   }
 }
 
@@ -217,6 +324,25 @@ async function captureWebSessionCredential(tabId: number, providerId: WebSession
   return result[0]?.result as CaptureResult | undefined || { status: "logged-out" };
 }
 
+async function captureWebSessionCredentialWithRetry(tabId: number, providerId: WebSessionProviderId): Promise<CaptureResult> {
+  let last: CaptureResult = { status: "logged-out" };
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    try {
+      last = await captureWebSessionCredential(tabId, providerId);
+    } catch (error) {
+      last = { status: "failed", message: describeCaptureError(error, getWebSessionSpec(providerId).label) };
+    }
+    if (last.status !== "failed" || attempt === 2) return last;
+    await delay(250);
+  }
+  return last;
+}
+
+function describeCaptureError(error: unknown, label: string): string {
+  const detail = error instanceof Error && error.message.trim() ? error.message.trim().slice(0, 180) : "页面脚本执行失败";
+  return `${label} 登录凭据采集失败：${detail}`;
+}
+
 async function readWebSessionCredential(providerId: WebSessionProviderId): Promise<CaptureResult> {
   if (providerId === "chatgpt-web") {
     try {
@@ -235,23 +361,39 @@ async function readWebSessionCredential(providerId: WebSessionProviderId): Promi
           ...(Number.isFinite(expiresAt) ? { expiresAt } : {}),
         },
       };
-    } catch {
-      return { status: "logged-out" };
+    } catch (error) {
+      const detail = error instanceof Error && error.message.trim() ? error.message.trim().slice(0, 180) : "网络请求或响应解析失败";
+      return { status: "failed", message: `ChatGPT 会话检查异常：${detail}` };
     }
   }
   if (providerId === "gemini-web") {
     try {
-      const response = await fetch("/app", { credentials: "include", headers: { Accept: "text/html" } });
-      if (!response.ok) return { status: "logged-out" };
+      const currentAccount = /\/u\/(\d+)(?:\/|$)/.exec(location.pathname)?.[1]
+        || new URL(location.href).searchParams.get("authuser")
+        || "0";
+      const accountPrefix = currentAccount !== "0" ? `/u/${currentAccount}` : "";
+      const response = await fetch(`${accountPrefix}/app`, { credentials: "include", headers: { Accept: "text/html" } });
+      if (response.status === 401 || response.status === 403) return { status: "logged-out" };
+      if (!response.ok) return { status: "failed", message: `Gemini 会话检查失败（HTTP ${response.status}）` };
       const html = await response.text();
-      const atValue = /"SNlM0e":"([^"]+)"/.exec(html)?.[1];
-      const blValue = /"cfb2h":"([^"]+)"/.exec(html)?.[1];
-      const fSid = /"FdrFJe":"([^"]+)"/.exec(html)?.[1];
-      if (!atValue || !blValue || !fSid || html.toLowerCase().includes("accounts.google.com")) return { status: "logged-out" };
-      const authUser = /data-index="(\d+)"/.exec(html)?.[1] || "0";
+      // SNlM0e is the `at` token used by the current StreamGenerate contract;
+      // thykhd is retained only as a fallback for older/different page builds.
+      const atValue = /"SNlM0e"\s*:\s*"([^"]+)"/.exec(html)?.[1]
+        || /"thykhd"\s*:\s*"([^"]+)"/.exec(html)?.[1];
+      const blValue = /"cfb2h"\s*:\s*"([^"]+)"/.exec(html)?.[1];
+      const fSid = /"FdrFJe"\s*:\s*"([^"]+)"/.exec(html)?.[1];
+      const responseUrl = new URL(response.url || location.href);
+      const lowerHtml = html.toLowerCase();
+      const loginPage = (lowerHtml.includes("servicelogin") || lowerHtml.includes("identifier"))
+        && (lowerHtml.includes("sign in") || lowerHtml.includes("signin") || lowerHtml.includes("登录"));
+      if (!atValue || !blValue || !fSid || loginPage || responseUrl.origin !== location.origin) return { status: "logged-out" };
+      const authUser = /\/u\/(\d+)(?:\/|$)/.exec(responseUrl.pathname)?.[1]
+        || /data-index="(\d+)"/.exec(html)?.[1]
+        || currentAccount;
       return { status: "ok", credential: { providerId: "gemini-web", authUser, capturedAt: Date.now() } };
-    } catch {
-      return { status: "logged-out" };
+    } catch (error) {
+      const detail = error instanceof Error && error.message.trim() ? error.message.trim().slice(0, 180) : "网络请求或响应解析失败";
+      return { status: "failed", message: `Gemini 会话检查异常：${detail}` };
     }
   }
   try {

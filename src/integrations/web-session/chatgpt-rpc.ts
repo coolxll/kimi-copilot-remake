@@ -1,4 +1,5 @@
 import { AppError } from "../../domain/errors";
+import { sha3_512 } from "js-sha3";
 
 export interface ChatGptWebRequest {
   url: string;
@@ -12,10 +13,44 @@ export interface ChatGptStreamUpdate {
 
 export interface ChatGptWebCredential {
   accessToken: string;
+  /** The browser-issued device id, when it is available to the caller. */
+  deviceId?: string;
+  /** A request-scoped Cookie header; never persist this in WebSessionCredential. */
+  cookieHeader?: string;
+}
+
+export interface ChatGptConversationRequirements {
+  token: string;
+  proofofwork?: {
+    required?: boolean;
+    seed?: string;
+    difficulty?: string | number;
+  };
+  arkose?: { required?: boolean };
+}
+
+export interface ChatGptConversationContext {
+  model: string;
+  requirements: ChatGptConversationRequirements;
+  proofToken?: string;
+  sharedWebsocket: boolean;
+}
+
+export interface ChatGptWebRequestOptions {
+  model?: string;
+  deviceId?: string;
+  requirementsToken?: string;
+  proofToken?: string;
+  arkoseToken?: string;
+  websocketRequestId?: string;
 }
 
 /** Build the Web conversation request used by the background protocol client. */
-export function buildChatGptWebRequest(prompt: string, accessToken: string): ChatGptWebRequest {
+export function buildChatGptWebRequest(
+  prompt: string,
+  accessToken: string,
+  options: ChatGptWebRequestOptions = {},
+): ChatGptWebRequest {
   const parentMessageId = generateRequestId();
   const body = {
     action: "next",
@@ -25,12 +60,12 @@ export function buildChatGptWebRequest(prompt: string, accessToken: string): Cha
       content: { content_type: "text", parts: [prompt] },
       metadata: {},
     }],
-    model: "auto",
+    model: options.model || "auto",
     parent_message_id: parentMessageId,
     conversation_id: null,
     timezone_offset_min: new Date().getTimezoneOffset(),
     timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
-    websocket_request_id: generateRequestId(),
+    ...(options.websocketRequestId ? { websocket_request_id: options.websocketRequestId } : {}),
     force_parallel_switch: "auto",
     force_paragen: false,
     force_nulligen: false,
@@ -52,10 +87,216 @@ export function buildChatGptWebRequest(prompt: string, accessToken: string): Cha
         "OAI-Language": "en-US",
         Origin: "https://chatgpt.com",
         Referer: "https://chatgpt.com/",
+        ...(options.deviceId ? { "Oai-Device-Id": options.deviceId } : {}),
+        ...(options.requirementsToken ? { "Openai-Sentinel-Chat-Requirements-Token": options.requirementsToken } : {}),
+        ...(options.proofToken ? { "Openai-Sentinel-Proof-Token": options.proofToken } : {}),
+        ...(options.arkoseToken ? { "Openai-Sentinel-Arkose-Token": options.arkoseToken } : {}),
       },
       body: JSON.stringify(body),
     },
   };
+}
+
+/**
+ * Prepare the same session prerequisites used by /conversation. This is kept
+ * exported for diagnostics and tests; the options-page test uses the real
+ * conversation stream below so it cannot report a models-only false positive.
+ */
+export async function testChatGptWebRpc(credential: ChatGptWebCredential, signal: AbortSignal): Promise<void> {
+  await prepareChatGptWebConversation(credential, signal);
+}
+
+export async function prepareChatGptWebConversation(
+  credential: ChatGptWebCredential,
+  signal: AbortSignal,
+): Promise<ChatGptConversationContext> {
+  const headers = buildChatGptAuthHeaders(credential);
+  const modelsResponse = await fetch("https://chatgpt.com/backend-api/models", {
+    method: "GET",
+    credentials: "include",
+    headers: { ...headers, Accept: "application/json" },
+    signal,
+  });
+  const modelsPayload = await readChatGptJsonResponse(modelsResponse, "模型列表", signal);
+  const model = selectChatGptModel(modelsPayload);
+
+  const requirementsResponse = await fetch("https://chatgpt.com/backend-api/sentinel/chat-requirements", {
+    method: "POST",
+    credentials: "include",
+    headers: { ...headers, Accept: "application/json", "Content-Type": "application/json" },
+    signal,
+  });
+  const requirementsPayload = await readChatGptJsonResponse(requirementsResponse, "会话安全要求", signal);
+  const requirements = parseChatGptRequirements(requirementsPayload);
+  if (requirements.arkose?.required) {
+    throw new AppError(
+      "security-check-required",
+      "ChatGPT Web 要求完成安全校验，请在 ChatGPT 页面完成验证后重试",
+      { retryable: true },
+    );
+  }
+  let proofToken: string | undefined;
+  if (requirements.proofofwork?.required) {
+    const seed = requirements.proofofwork.seed;
+    const difficulty = requirements.proofofwork.difficulty;
+    if (!seed || difficulty === undefined || difficulty === null) {
+      throw new AppError("api-contract", "ChatGPT Web Proof-of-Work 参数缺失", { retryable: true });
+    }
+    proofToken = await generateChatGptProofToken(
+      seed,
+      String(difficulty),
+      typeof navigator !== "undefined" ? navigator.userAgent : "Mozilla/5.0",
+      signal,
+    );
+  }
+
+  let sharedWebsocket = false;
+  const accountResponse = await fetch("https://chatgpt.com/backend-api/accounts/check/v4-2023-04-27", {
+    method: "GET",
+    credentials: "include",
+    headers: { ...headers, Accept: "application/json" },
+    signal,
+  });
+  if (accountResponse.status === 401 || accountResponse.status === 403) {
+    throw new AppError("auth-required", "ChatGPT Web 登录态已失效，请重新登录", { retryable: true });
+  }
+  if (accountResponse.ok) {
+    const accountText = await accountResponse.text();
+    sharedWebsocket = accountText.includes("shared_websocket");
+  }
+  return { model, requirements, ...(proofToken ? { proofToken } : {}), sharedWebsocket };
+}
+
+export async function generateChatGptProofToken(
+  seed: string,
+  difficulty: string,
+  userAgent: string,
+  signal?: AbortSignal,
+): Promise<string> {
+  const cores = [1, 2, 4];
+  const screens = [3008, 4010, 6000];
+  const reacts = [
+    "_reactListeningcfilawjnerp",
+    "_reactListening9ne2dfo1i47",
+    "_reactListening410nzwhan2a",
+  ];
+  const acts = ["alert", "ontransitionend", "onprogress"];
+  const randomIndex = (length: number): number => {
+    if (globalThis.crypto?.getRandomValues) {
+      const value = new Uint32Array(1);
+      globalThis.crypto.getRandomValues(value);
+      return value[0] % length;
+    }
+    return Math.floor(Math.random() * length);
+  };
+  const config: unknown[] = [
+    screens[randomIndex(screens.length)] + cores[randomIndex(cores.length)],
+    new Date().toString(),
+    4294705152,
+    0,
+    userAgent,
+    "https://tcr9i.chat.openai.com/v2/35536E1E-65B4-4D96-9D97-6ADB7EFF8147/api.js",
+    "dpl=1440a687921de39ff5ee56b92807faaadce73f13",
+    "en",
+    "en-US",
+    4294705152,
+    "plugins−[object PluginArray]",
+    reacts[randomIndex(reacts.length)],
+    acts[randomIndex(acts.length)],
+  ];
+  const normalizedDifficulty = difficulty.toLowerCase();
+  for (let attempt = 0; attempt < 200_000; attempt += 1) {
+    if (signal?.aborted) throw signal.reason ?? new DOMException("Aborted", "AbortError");
+    config[3] = attempt;
+    const base = encodeBase64(JSON.stringify(config));
+    const hash = sha3_512(seed + base);
+    if (hash.slice(0, normalizedDifficulty.length) <= normalizedDifficulty) return `gAAAAAB${base}`;
+    if (attempt % 512 === 511) await new Promise<void>((resolve) => setTimeout(resolve, 0));
+  }
+  return `gAAAAABwQ8Lk5FbGpA2NcR9dShT6gYjU7VxZ4D${encodeBase64(JSON.stringify(seed))}`;
+}
+
+function buildChatGptAuthHeaders(credential: ChatGptWebCredential): Record<string, string> {
+  return {
+    Authorization: `Bearer ${credential.accessToken}`,
+    "Oai-Device-Id": credential.deviceId || generateRequestId(),
+    "OAI-Language": typeof navigator !== "undefined" ? navigator.language || "en-US" : "en-US",
+    Origin: "https://chatgpt.com",
+    Referer: "https://chatgpt.com/",
+    ...(credential.cookieHeader ? { Cookie: credential.cookieHeader } : {}),
+  };
+}
+
+async function readChatGptJsonResponse(response: Response, label: string, signal: AbortSignal): Promise<unknown> {
+  if (response.status === 401 || response.status === 403) {
+    throw new AppError("auth-required", "ChatGPT Web 登录态已失效，请重新登录", { retryable: true });
+  }
+  if (response.status === 418) {
+    throw new AppError("security-check-required", "ChatGPT Web 要求完成安全校验，请在 ChatGPT 页面完成验证后重试", { retryable: true });
+  }
+  if (response.status === 429) {
+    throw new AppError("rate-limit", "ChatGPT Web 请求过于频繁，请稍后重试", { retryable: true });
+  }
+  if (!response.ok) {
+    throw new AppError("api-unavailable", `ChatGPT Web ${label}失败（HTTP ${response.status}）`, { retryable: true });
+  }
+  const contentType = response.headers.get("content-type")?.toLowerCase() || "";
+  const text = await response.text();
+  if (signal.aborted) throw signal.reason ?? new DOMException("Aborted", "AbortError");
+  if (contentType.includes("text/html") || /<html[\s>]/i.test(text)) {
+    throw new AppError("auth-required", "ChatGPT Web 返回了登录页面，请重新登录", { retryable: true });
+  }
+  try {
+    return JSON.parse(text) as unknown;
+  } catch (error) {
+    throw new AppError("api-contract", `ChatGPT Web ${label}响应不是有效 JSON`, { cause: error, retryable: true });
+  }
+}
+
+function selectChatGptModel(value: unknown): string {
+  const models: unknown[] = value && typeof value === "object" && Array.isArray((value as Record<string, unknown>).models)
+    ? (value as Record<string, unknown>).models as unknown[]
+    : Array.isArray(value) ? value : [];
+  const slugs = models
+    .map((model) => typeof model === "string" ? model : model && typeof model === "object" ? (model as Record<string, unknown>).slug : undefined)
+    .filter((slug): slug is string => typeof slug === "string" && slug.trim().length > 0);
+  if (slugs.includes("auto")) return "auto";
+  if (slugs[0]) return slugs[0];
+  throw new AppError("api-contract", "ChatGPT Web 没有返回可用模型", { retryable: true });
+}
+
+function parseChatGptRequirements(value: unknown): ChatGptConversationRequirements {
+  if (!value || typeof value !== "object") {
+    throw new AppError("api-contract", "ChatGPT Web 会话安全要求为空", { retryable: true });
+  }
+  const record = value as Record<string, unknown>;
+  if (typeof record.token !== "string" || !record.token) {
+    throw new AppError("api-contract", "ChatGPT Web 会话安全 Token 缺失", { retryable: true });
+  }
+  const proof = record.proofofwork && typeof record.proofofwork === "object"
+    ? record.proofofwork as Record<string, unknown>
+    : undefined;
+  const arkose = record.arkose && typeof record.arkose === "object"
+    ? record.arkose as Record<string, unknown>
+    : undefined;
+  return {
+    token: record.token,
+    ...(proof ? {
+      proofofwork: {
+        required: proof.required === true,
+        ...(typeof proof.seed === "string" ? { seed: proof.seed } : {}),
+        ...((typeof proof.difficulty === "string" || typeof proof.difficulty === "number") ? { difficulty: proof.difficulty } : {}),
+      },
+    } : {}),
+    ...(arkose ? { arkose: { required: arkose.required === true } } : {}),
+  };
+}
+
+function encodeBase64(value: string): string {
+  const bytes = new TextEncoder().encode(value);
+  let binary = "";
+  for (const byte of bytes) binary += String.fromCharCode(byte);
+  return btoa(binary);
 }
 
 export interface ChatGptStreamLine {
@@ -88,18 +329,34 @@ export async function streamChatGptWebRpc(
   onUpdate: (update: ChatGptStreamUpdate) => void,
 ): Promise<{ conversationId?: string }> {
   let registeredSocket: WebSocket | null = null;
+  let socketStream: Promise<{ conversationId?: string }> | undefined;
+  const socketExpected: { responseId?: string; conversationId?: string } = {};
   try {
-    const authHeaders = {
+    const context = await prepareChatGptWebConversation(credential, signal);
+    const authHeaders: Record<string, string> = {
+      ...buildChatGptAuthHeaders(credential),
       Accept: "text/event-stream",
       "Content-Type": "application/json",
-      Authorization: `Bearer ${credential.accessToken}`,
-      "OAI-Language": typeof navigator !== "undefined" ? navigator.language || "en-US" : "en-US",
-      Origin: "https://chatgpt.com",
-      Referer: "https://chatgpt.com/",
+      "Openai-Sentinel-Chat-Requirements-Token": context.requirements.token,
+      ...(context.proofToken ? { "Openai-Sentinel-Proof-Token": context.proofToken } : {}),
     };
-
-    registeredSocket = await openRegisteredSocket(authHeaders, signal);
-    const request = buildChatGptWebRequest(prompt, credential.accessToken);
+    let websocketRequestId: string | undefined;
+    if (context.sharedWebsocket) {
+      registeredSocket = await openRegisteredSocket(authHeaders, signal, true);
+      if (!registeredSocket) throw new AppError("api-unavailable", "ChatGPT Web 共享流连接未建立", { retryable: true });
+      websocketRequestId = generateRequestId();
+    }
+    // The shared websocket can start delivering frames as soon as it opens.
+    // Attach the reader before POST /conversation so the first body frame is
+    // not lost while the handshake response is in flight.
+    if (registeredSocket) socketStream = readWebSocketStream(registeredSocket, signal, onUpdate, socketExpected);
+    const request = buildChatGptWebRequest(prompt, credential.accessToken, {
+      model: context.model,
+      deviceId: authHeaders["Oai-Device-Id"],
+      requirementsToken: context.requirements.token,
+      proofToken: context.proofToken,
+      websocketRequestId,
+    });
     const response = await fetch(request.url, { ...request.init, signal, headers: authHeaders });
     if (response.status === 401 || response.status === 403) {
       throw new AppError("auth-required", "ChatGPT Web 登录态已失效，请重新登录", { retryable: true });
@@ -108,7 +365,7 @@ export async function streamChatGptWebRpc(
       throw new AppError("rate-limit", "ChatGPT Web 请求过于频繁，请稍后重试", { retryable: true });
     }
     if (response.status === 418) {
-      throw new AppError("auth-required", "ChatGPT Web 暂时要求完成安全校验，请重新打开页面验证", { retryable: true });
+      throw new AppError("security-check-required", "ChatGPT Web 要求完成安全校验，请在 ChatGPT 页面完成验证后重试", { retryable: true });
     }
     if (!response.ok) {
       throw new AppError("api-unavailable", `ChatGPT Web 请求失败（HTTP ${response.status}）`, { retryable: true });
@@ -117,18 +374,51 @@ export async function streamChatGptWebRpc(
     const contentType = response.headers.get("content-type") || "";
     let conversationId: string | undefined;
     if (contentType.includes("application/json")) {
-      const handshake = await response.json() as { wss_url?: unknown; response_id?: unknown };
+      const handshake = await response.json() as {
+        wss_url?: unknown;
+        response_id?: unknown;
+        conversation_id?: unknown;
+        websocket_request_id?: unknown;
+      };
       const wssUrl = typeof handshake.wss_url === "string" ? handshake.wss_url : "";
       const responseId = typeof handshake.response_id === "string" ? handshake.response_id : "";
-      if (!wssUrl || !responseId) throw new AppError("api-contract", "ChatGPT Web 没有返回可用的流连接信息", { retryable: true });
-      const socket = registeredSocket?.url === wssUrl
-        ? registeredSocket
-        : await connectWebSocket(wssUrl, signal);
-      if (!socket) throw new AppError("api-unavailable", "ChatGPT Web 流连接失败", { retryable: true });
-      if (registeredSocket && socket !== registeredSocket) registeredSocket.close();
-      const result = await readWebSocketStream(socket, responseId, signal, onUpdate);
-      conversationId = result.conversationId;
+      const handshakeConversationId = typeof handshake.conversation_id === "string"
+        ? handshake.conversation_id
+        : undefined;
+      const websocketRequestId = typeof handshake.websocket_request_id === "string"
+        ? handshake.websocket_request_id
+        : undefined;
+
+      Object.assign(socketExpected, {
+        ...(responseId ? { responseId } : {}),
+        ...(handshakeConversationId ? { conversationId: handshakeConversationId } : {}),
+      });
+
+      // Modern shared-websocket responses return conversation_id and
+      // websocket_request_id. Older deployments returned wss_url/response_id
+      // and required a second websocket connection, so keep that path too.
+      if (socketStream && (!wssUrl || registeredSocket?.url === wssUrl)) {
+        const result = await socketStream;
+        conversationId = result.conversationId || handshakeConversationId;
+      } else if (wssUrl) {
+        const socket = await connectWebSocket(wssUrl, signal, "json.reliable.webpubsub.azure.v1");
+        if (!socket) throw new AppError("api-unavailable", "ChatGPT Web 流连接失败", { retryable: true });
+        const result = await readWebSocketStream(socket, signal, onUpdate, {
+          responseId: responseId || undefined,
+          conversationId: handshakeConversationId,
+        });
+        conversationId = result.conversationId || handshakeConversationId;
+      } else if (handshakeConversationId && websocketRequestId) {
+        throw new AppError("api-unavailable", "ChatGPT Web 共享流连接未建立", { retryable: true });
+      } else {
+        throw new AppError("api-contract", "ChatGPT Web 没有返回可用的流连接信息", { retryable: true });
+      }
     } else {
+      if (registeredSocket) {
+        registeredSocket.close();
+        await socketStream?.catch(() => undefined);
+        socketStream = undefined;
+      }
       const result = await readChatGptStreamWithUpdates(response, signal, onUpdate);
       conversationId = result.conversationId;
     }
@@ -136,6 +426,7 @@ export async function streamChatGptWebRpc(
     return { conversationId };
   } finally {
     if (registeredSocket && registeredSocket.readyState !== WebSocket.CLOSED) registeredSocket.close();
+    await socketStream?.catch(() => undefined);
   }
 }
 
@@ -211,7 +502,11 @@ function consumeChatGptLines(
   return { buffer, text: latestText, conversationId, done };
 }
 
-async function openRegisteredSocket(headers: Record<string, string>, signal: AbortSignal): Promise<WebSocket | null> {
+async function openRegisteredSocket(
+  headers: Record<string, string>,
+  signal: AbortSignal,
+  required = false,
+): Promise<WebSocket | null> {
   try {
     const response = await fetch("https://chatgpt.com/backend-api/register-websocket", {
       method: "POST",
@@ -222,21 +517,33 @@ async function openRegisteredSocket(headers: Record<string, string>, signal: Abo
     if (response.status === 401 || response.status === 403) {
       throw new AppError("auth-required", "ChatGPT Web 登录态已失效，请重新登录", { retryable: true });
     }
-    if (!response.ok) return null;
+    if (!response.ok) {
+      if (required) throw new AppError("api-unavailable", `ChatGPT Web 共享流注册失败（HTTP ${response.status}）`, { retryable: true });
+      return null;
+    }
     const payload = await response.json() as { wss_url?: unknown };
-    return typeof payload.wss_url === "string" ? connectWebSocket(payload.wss_url, signal) : null;
+    if (typeof payload.wss_url !== "string") {
+      if (required) throw new AppError("api-contract", "ChatGPT Web 共享流地址缺失", { retryable: true });
+      return null;
+    }
+    const socket = await connectWebSocket(payload.wss_url, signal);
+    if (!socket && required) throw new AppError("api-unavailable", "ChatGPT Web 共享流连接失败", { retryable: true });
+    return socket;
   } catch (error) {
     if (signal.aborted) throw signal.reason ?? new DOMException("Aborted", "AbortError");
     if (error instanceof AppError) throw error;
-    // Registration is an optimization. The conversation endpoint can still
-    // return a normal SSE response when WebSocket registration is unavailable.
+    if (required) {
+      if (error instanceof AppError) throw error;
+      throw new AppError("api-unavailable", "ChatGPT Web 共享流注册失败", { cause: error, retryable: true });
+    }
+    // Registration is optional when the account does not require shared WebSocket.
     return null;
   }
 }
 
-async function connectWebSocket(url: string, signal: AbortSignal): Promise<WebSocket | null> {
+async function connectWebSocket(url: string, signal: AbortSignal, protocol?: string): Promise<WebSocket | null> {
   if (signal.aborted) throw signal.reason ?? new DOMException("Aborted", "AbortError");
-  const socket = new WebSocket(url, "json.reliable.webpubsub.azure.v1");
+  const socket = protocol ? new WebSocket(url, protocol) : new WebSocket(url);
   try {
     await waitForSocket(socket, signal, 5_000);
     return socket;
@@ -268,9 +575,9 @@ async function waitForSocket(socket: WebSocket, signal: AbortSignal, timeoutMs: 
 
 async function readWebSocketStream(
   socket: WebSocket,
-  responseId: string,
   signal: AbortSignal,
   onUpdate: (update: ChatGptStreamUpdate) => void,
+  expected: { responseId?: string; conversationId?: string } = {},
 ): Promise<{ conversationId?: string }> {
   return new Promise<{ conversationId?: string }>((resolve, reject) => {
     let latestText = "";
@@ -309,14 +616,29 @@ async function readWebSocketStream(
         const envelope = JSON.parse(event.data) as {
           sequenceId?: unknown;
           type?: unknown;
-          data?: { response_id?: unknown; body?: unknown };
+          conversation_id?: unknown;
+          body?: unknown;
+          data?: { response_id?: unknown; conversation_id?: unknown; body?: unknown };
         };
         if (typeof envelope.sequenceId === "number" && envelope.sequenceId > lastSequenceId) {
           lastSequenceId = envelope.sequenceId;
           if (socket.readyState === WebSocket.OPEN) socket.send(JSON.stringify({ type: "sequenceAck", sequenceId: lastSequenceId }));
         }
-        if (envelope.type !== "message" || envelope.data?.response_id !== responseId || typeof envelope.data.body !== "string") return;
-        for (const line of decodeBase64(envelope.data.body).split("\n")) {
+        const isLegacyMessage = envelope.type === "message";
+        const isSharedBody = envelope.type === "http.response.body";
+        if (!isLegacyMessage && !isSharedBody) return;
+        const responseId = typeof envelope.data?.response_id === "string" ? envelope.data.response_id : undefined;
+        const frameConversationId = typeof envelope.conversation_id === "string"
+          ? envelope.conversation_id
+          : typeof envelope.data?.conversation_id === "string" ? envelope.data.conversation_id : undefined;
+        const frameBody = typeof envelope.body === "string"
+          ? envelope.body
+          : typeof envelope.data?.body === "string" ? envelope.data.body : undefined;
+        if (!frameBody) return;
+        if (expected.responseId && responseId && responseId !== expected.responseId) return;
+        if (expected.conversationId && frameConversationId && frameConversationId !== expected.conversationId) return;
+        if (frameConversationId) conversationId = frameConversationId;
+        for (const line of decodeChatGptWebSocketBody(frameBody).split("\n")) {
           const parsed = parseChatGptStreamLine(line);
           if (!parsed) continue;
           if (parsed.conversationId) conversationId = parsed.conversationId;
@@ -385,10 +707,23 @@ function mergeChatGptText(previous: string, next: string): string {
 }
 
 function decodeBase64(value: string): string {
-  const binary = atob(value);
+  const normalized = value.replace(/-/g, "+").replace(/_/g, "/").padEnd(Math.ceil(value.length / 4) * 4, "=");
+  const binary = atob(normalized);
   const bytes = new Uint8Array(binary.length);
   for (let index = 0; index < binary.length; index += 1) bytes[index] = binary.charCodeAt(index);
   return new TextDecoder("utf-8").decode(bytes);
+}
+
+function decodeChatGptWebSocketBody(value: string): string {
+  const trimmed = value.trim();
+  if (trimmed.startsWith("data:") || trimmed === "[DONE]" || trimmed.startsWith("{")) return trimmed;
+  try {
+    const decoded = decodeBase64(trimmed);
+    return decoded || trimmed;
+  } catch {
+    // A few compatible gateways forward the SSE body without base64.
+    return trimmed;
+  }
 }
 
 function generateRequestId(): string {

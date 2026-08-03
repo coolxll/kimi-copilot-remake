@@ -12,6 +12,17 @@ export class KimiProvider implements SummaryProvider {
     if (!(await this.storage.getKimiTokens())) throw new AppError("auth-required", "请先登录 Kimi");
   }
 
+  async testConnection(signal?: AbortSignal): Promise<{ ok: true; message: string }> {
+    const tokens = await this.storage.getKimiTokens();
+    if (!tokens) throw new AppError("auth-required", "请先登录 Kimi");
+    const client = new KimiClient({
+      tokens,
+      onTokensRefreshed: (next) => this.storage.saveKimiTokens(next),
+    });
+    await client.testConnection(signal);
+    return { ok: true, message: "Kimi Web Token 刷新成功，连通性正常" };
+  }
+
   async *summarize(request: SummaryRequest, signal: AbortSignal): AsyncIterable<SummaryEvent> {
     const tokens = await this.storage.getKimiTokens();
     if (!tokens) throw new AppError("auth-required", "请先登录 Kimi");

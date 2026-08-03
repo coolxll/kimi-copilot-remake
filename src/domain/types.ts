@@ -4,6 +4,7 @@ export type WebSessionCredential =
   | {
       providerId: "chatgpt-web";
       accessToken: string;
+      deviceId?: string;
       capturedAt: number;
       expiresAt?: number;
     }
@@ -42,6 +43,7 @@ export interface ExtractedDocument {
   title: string;
   sourceUrl: string;
   sourceText: string;
+  imageUrls?: string[];
   uploadFile?: File;
   warnings: string[];
 }

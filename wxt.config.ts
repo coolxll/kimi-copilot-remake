@@ -8,6 +8,9 @@ export default defineConfig({
     version: "0.1.0",
     minimum_chrome_version: "140",
     permissions: ["activeTab", "scripting", "sidePanel", "storage", "notifications"],
+    // Requested only when the user enables ChatGPT Web. Cookie values are
+    // used for one request and never persisted in extension storage or logs.
+    optional_permissions: ["cookies"],
     content_security_policy: {
       extension_pages: "script-src 'self' 'wasm-unsafe-eval'; object-src 'self'",
     },

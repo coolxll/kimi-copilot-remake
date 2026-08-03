@@ -9,6 +9,7 @@ export type AppErrorCode =
   | "parse-failed"
   | "api-contract"
   | "api-auth"
+  | "security-check-required"
   | "rate-limit"
   | "context-limit"
   | "api-unavailable"

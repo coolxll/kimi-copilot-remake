@@ -1,7 +1,8 @@
 import { useEffect, useRef, useState } from "react";
 import { browser } from "wxt/browser";
-import type { AppSettingsV2, OpenAICompatibleConfig, WebSessionProviderId } from "../../domain/types";
-import { DEFAULT_CHUNK_CHARS, DEFAULT_MAX_SOURCE_CHARS, DEFAULT_PROMPT, PROVIDER_LABELS } from "../../domain/types";
+import type { AppSettingsV2, OpenAICompatibleConfig, ProviderId, WebSessionProviderId } from "../../domain/types";
+import { DEFAULT_CHUNK_CHARS, DEFAULT_MAX_SOURCE_CHARS, DEFAULT_PROMPT, isWebSessionProvider, PROVIDER_LABELS } from "../../domain/types";
+import type { AppErrorCode } from "../../domain/errors";
 import { AppError, toAppError } from "../../domain/errors";
 import { ensureApiHostPermission, normalizeApiRoot, revokeApiHostPermission, shouldRevokeApiHostPermission, validateApiRoot } from "../../platform/chrome/permissions";
 import { createAppServices } from "../../application/services";
@@ -21,7 +22,9 @@ export function OptionsApp() {
   const [hasKimiToken, setHasKimiToken] = useState(false);
   const [webStatuses, setWebStatuses] = useState<Record<WebSessionProviderId, WebSessionLoginStatus>>(createInitialWebSessionStatuses);
   const [checkingWebStatus, setCheckingWebStatus] = useState<WebSessionProviderId | "all" | null>(null);
+  const [connectionStatuses, setConnectionStatuses] = useState<Record<ProviderId, ConnectivityStatus>>(createInitialConnectivityStatuses);
   const loginControllerRef = useRef<AbortController | undefined>(undefined);
+  const connectionControllersRef = useRef(new Map<ProviderId, AbortController>());
   const [notice, setNotice] = useState<{ kind: "success" | "error"; text: string }>();
   const [saving, setSaving] = useState(false);
 
@@ -56,7 +59,10 @@ export function OptionsApp() {
       }
     })();
     void refreshWebSessionStatuses();
-    return () => loginControllerRef.current?.abort("options closed");
+    return () => {
+      loginControllerRef.current?.abort("options closed");
+      for (const controller of connectionControllersRef.current.values()) controller.abort("options closed");
+    };
     // Services are stable for this options page.
   }, []);
 
@@ -107,17 +113,43 @@ export function OptionsApp() {
     setNotice({ kind: "success", text: "兼容 API Token 已清除" });
   };
 
-  const testConnection = async () => {
+  const testProviderConnection = async (providerId: ProviderId) => {
+    connectionControllersRef.current.get(providerId)?.abort("new connectivity test");
+    const controller = new AbortController();
+    connectionControllersRef.current.set(providerId, controller);
     setNotice(undefined);
+    setConnectionStatuses((current) => ({ ...current, [providerId]: { state: "testing" } }));
     try {
-      const nextConfig = normalizeConfig(config);
-      validateApiRoot(nextConfig.apiRoot);
-      await ensureApiHostPermission(nextConfig.apiRoot);
-      const secret = token.trim() ? { apiToken: token.trim() } : await services.storage.getOpenAISecret();
-      const result = await services.testOpenAIConnection(nextConfig, secret);
-      setNotice({ kind: "success", text: result.message });
+      let result: { ok: boolean; message: string; externalUrl?: string };
+      if (providerId === "openai-compatible") {
+        const nextConfig = normalizeConfig(config);
+        validateApiRoot(nextConfig.apiRoot);
+        await ensureApiHostPermission(nextConfig.apiRoot);
+        const secret = token.trim() ? { apiToken: token.trim() } : await services.storage.getOpenAISecret();
+        result = await services.testProviderConnection(providerId, {
+          config: nextConfig,
+          secret,
+          signal: controller.signal,
+        });
+      } else {
+        result = await services.testProviderConnection(providerId, { signal: controller.signal });
+      }
+      if (controller.signal.aborted) return;
+      setConnectionStatuses((current) => ({
+        ...current,
+        [providerId]: { state: result.ok ? "success" : "error", message: result.message, ...(result.externalUrl ? { externalUrl: result.externalUrl } : {}) },
+      }));
     } catch (error) {
-      setNotice({ kind: "error", text: toAppError(error).message });
+      if (!controller.signal.aborted) {
+        const appError = toAppError(error);
+        setConnectionStatuses((current) => ({
+          ...current,
+          [providerId]: { state: "error", message: appError.message, code: appError.code },
+        }));
+      }
+    } finally {
+      if (!controller.signal.aborted && isWebSessionProvider(providerId)) void refreshWebSessionStatuses(providerId);
+      if (connectionControllersRef.current.get(providerId) === controller) connectionControllersRef.current.delete(providerId);
     }
   };
 
@@ -127,6 +159,7 @@ export function OptionsApp() {
     try {
       await services.auth.openLoginAndWait(120_000, controller.signal);
       setHasKimiToken(true);
+      setConnectionStatuses((current) => ({ ...current, "kimi-web": { state: "idle" } }));
       setNotice({ kind: "success", text: "Kimi 登录态已保存" });
     } catch (error) {
       if (!controller.signal.aborted) setNotice({ kind: "error", text: toAppError(error).message });
@@ -138,6 +171,7 @@ export function OptionsApp() {
   const clearKimi = async () => {
     await services.auth.clear();
     setHasKimiToken(false);
+    setConnectionStatuses((current) => ({ ...current, "kimi-web": { state: "idle" } }));
     setNotice({ kind: "success", text: "Kimi 登录态已清除" });
   };
 
@@ -147,6 +181,7 @@ export function OptionsApp() {
     try {
       await services.webSessions.openLogin(providerId, 120_000, controller.signal);
       void refreshWebSessionStatuses(providerId);
+      setConnectionStatuses((current) => ({ ...current, [providerId]: { state: "idle" } }));
       setNotice({ kind: "success", text: `${PROVIDER_LABELS[providerId]} 登录态已保存，正常总结时使用后台 Web 协议。` });
     } catch (error) {
       if (!controller.signal.aborted) setNotice({ kind: "error", text: toAppError(error).message });
@@ -158,6 +193,7 @@ export function OptionsApp() {
   const clearWebSession = async (providerId: WebSessionProviderId) => {
     await services.storage.clearWebSessionCredential(providerId);
     setWebStatuses((current) => ({ ...current, [providerId]: "no-page" }));
+    setConnectionStatuses((current) => ({ ...current, [providerId]: { state: "idle" } }));
     setNotice({ kind: "success", text: `${PROVIDER_LABELS[providerId]} 登录态已清除` });
   };
 
@@ -169,7 +205,7 @@ export function OptionsApp() {
     {notice && <div className={notice.kind === "success" ? "success" : "error"}>{notice.text}</div>}
     <section className="card">
       <h2>提取器测试</h2>
-      <p className="muted">测试 YouTube、Bilibili、普通网页和 PDF 的实际提取结果，查看正文、字幕和 warning。</p>
+      <p className="muted">测试 YouTube、Bilibili、Discourse、知乎、普通网页和 PDF 的实际提取结果，查看正文、讨论、评论和 warning。</p>
       <div className="actions"><button className="button" onClick={openExtractorTest}>打开提取器测试页</button></div>
     </section>
     <section className="card">
@@ -178,15 +214,15 @@ export function OptionsApp() {
     </section>
     <section className="card">
       <h2 className="provider-heading"><ProviderIcon providerId="kimi-web" /> Kimi Web</h2><p className="muted">复用当前浏览器中的 Kimi 登录态，文件会通过 Kimi 文件接口处理。</p>
-      <div className="actions"><span className={hasKimiToken ? "success" : "warning"}>{hasKimiToken ? "已配置登录态" : "未登录"}</span><button className="button" onClick={() => void loginKimi()}>{hasKimiToken ? "重新登录" : "登录 Kimi"}</button>{hasKimiToken && <button className="button danger" onClick={() => void clearKimi()}>清除登录态</button>}</div>
+      <div className="actions"><span className={hasKimiToken ? "success" : "warning"}>{hasKimiToken ? "已配置登录态" : "未登录"}</span><button className="button" onClick={() => void loginKimi()}>{hasKimiToken ? "重新登录" : "登录 Kimi"}</button><button className="button" disabled={!hasKimiToken || isConnectionTesting(connectionStatuses["kimi-web"])} onClick={() => void testProviderConnection("kimi-web")}>{isConnectionTesting(connectionStatuses["kimi-web"]) ? "测试中…" : "测试连通性"}</button>{renderConnectivityStatus(connectionStatuses["kimi-web"])}{hasKimiToken && <button className="button danger" onClick={() => void clearKimi()}>清除登录态</button>}</div>
     </section>
     <section className="card">
       <h2>网页会话后端</h2>
-      <p className="muted">登录时打开对应网站采集可复用凭据并保存在本机扩展存储；正常总结走后台 Web 协议，不向网页输入提示词，也不申请 cookies 读取权限。内部 Web 协议变化可能影响读取。</p>
+      <p className="muted">登录时打开对应网站采集可复用凭据并保存在本机扩展存储；“发送会话测试”会向对应账号发送 PROJECT_OK，并创建一条测试会话。ChatGPT Cookie 只在请求内存中使用，不会落盘。</p>
       <div className="actions">{WEB_SESSION_PROVIDER_IDS.map((providerId) => {
         const status = webStatuses[providerId];
         const isChecking = checkingWebStatus === "all" || checkingWebStatus === providerId;
-        return <span key={providerId} className="web-session-action-group"><span className="web-session-provider"><ProviderBadge providerId={providerId} /><span className={webSessionStatusClass(status)}>{isChecking ? "检测中…" : WEB_SESSION_STATUS_LABELS[status]}</span></span><button className="button provider-button" onClick={() => void openWebSession(providerId)}><ProviderIcon providerId={providerId} />{status === "logged-in" ? `更新 ${PROVIDER_LABELS[providerId]}` : `登录 ${PROVIDER_LABELS[providerId]}`}</button><button className="button" disabled={isChecking} onClick={() => void refreshWebSessionStatuses(providerId)}>检测</button>{status === "logged-in" && <button className="button danger" onClick={() => void clearWebSession(providerId)}>清除</button>}</span>;
+        return <span key={providerId} className="web-session-action-group"><span className="web-session-provider"><ProviderBadge providerId={providerId} /><span className={webSessionStatusClass(status)}>{isChecking ? "检测中…" : WEB_SESSION_STATUS_LABELS[status]}</span></span><button className="button provider-button" onClick={() => void openWebSession(providerId)}><ProviderIcon providerId={providerId} />{status === "logged-in" || status === "page-logged-in" || status === "saved-unverified" ? `更新 ${PROVIDER_LABELS[providerId]}` : `登录 ${PROVIDER_LABELS[providerId]}`}</button><button className="button" disabled={isChecking} onClick={() => void refreshWebSessionStatuses(providerId)}>检测登录态</button><button className="button" disabled={isConnectionTesting(connectionStatuses[providerId])} onClick={() => void testProviderConnection(providerId)}>{isConnectionTesting(connectionStatuses[providerId]) ? "测试中…" : "发送会话测试"}</button>{renderConnectivityStatus(connectionStatuses[providerId])}{status === "logged-in" || status === "saved-unverified" ? <button className="button danger" onClick={() => void clearWebSession(providerId)}>清除</button> : null}</span>;
       })}</div>
     </section>
     <section className="card">
@@ -195,7 +231,7 @@ export function OptionsApp() {
       <div className="field"><label className="label" htmlFor="model">Model</label><input id="model" className="input" value={config.model} placeholder="填写服务商提供的模型名" onChange={(event) => setConfig({ ...config, model: event.target.value })} /></div>
       <div className="field"><label className="label" htmlFor="token">API Token</label><input id="token" className="input" type="password" value={token} placeholder={hasToken ? "已配置（留空保持不变）" : "输入 Token；本机服务可留空"} onChange={(event) => setToken(event.target.value)} />{hasToken && <p className="muted">Token 已配置，不会回填明文。</p>}</div>
       <div className="option-grid"><div className="field"><label className="label" htmlFor="chunkChars">单块字符数</label><input id="chunkChars" className="input" type="number" min={4000} max={50000} value={config.chunkChars} onChange={(event) => setConfig({ ...config, chunkChars: Number(event.target.value) })} /></div><div className="field"><label className="label" htmlFor="maxSourceChars">最大源文本</label><input id="maxSourceChars" className="input" type="number" min={20000} max={500000} value={config.maxSourceChars} onChange={(event) => setConfig({ ...config, maxSourceChars: Number(event.target.value) })} /></div></div>
-      <div className="actions"><button className="button" onClick={() => void testConnection()}>测试连接</button><button className="button danger" disabled={!hasToken} onClick={() => void clearToken()}>清除 Token</button></div>
+      <div className="actions"><button className="button" disabled={isConnectionTesting(connectionStatuses["openai-compatible"])} onClick={() => void testProviderConnection("openai-compatible")}>{isConnectionTesting(connectionStatuses["openai-compatible"]) ? "测试中…" : "测试连接"}</button>{renderConnectivityStatus(connectionStatuses["openai-compatible"])}<button className="button danger" disabled={!hasToken} onClick={() => void clearToken()}>清除 Token</button></div>
     </section>
     <div className="actions"><button className="button primary" disabled={saving} onClick={() => void save()}>{saving ? "保存中…" : "保存全部设置"}</button></div>
   </div></main>;
@@ -206,8 +242,10 @@ function normalizeConfig(config: OpenAICompatibleConfig): OpenAICompatibleConfig
 }
 
 const WEB_SESSION_STATUS_LABELS: Record<WebSessionLoginStatus, string> = {
-  "logged-in": "当前页面检测到已登录",
+  "logged-in": "扩展登录态可用",
+  "page-logged-in": "页面已登录，尚未采集扩展登录态",
   "logged-out": "当前页面检测到未登录",
+  "saved-unverified": "已保存登录态，尚未实时验证",
   "no-page": "未打开对应页面",
   "permission-required": "未授权页面访问",
   unknown: "暂无法检测",
@@ -223,6 +261,46 @@ function createInitialWebSessionStatuses(): Record<WebSessionProviderId, WebSess
 
 function webSessionStatusClass(status: WebSessionLoginStatus): string {
   if (status === "logged-in") return "success";
-  if (status === "logged-out") return "warning";
+  if (status === "page-logged-in" || status === "logged-out" || status === "saved-unverified") return "warning";
+  return "muted";
+}
+
+type ConnectivityStatus = {
+  state: "idle" | "testing" | "success" | "error";
+  message?: string;
+  code?: AppErrorCode;
+  externalUrl?: string;
+};
+
+function createInitialConnectivityStatuses(): Record<ProviderId, ConnectivityStatus> {
+  return {
+    "kimi-web": { state: "idle" },
+    "chatgpt-web": { state: "idle" },
+    "gemini-web": { state: "idle" },
+    "deepseek-web": { state: "idle" },
+    "openai-compatible": { state: "idle" },
+  };
+}
+
+function isConnectionTesting(status: ConnectivityStatus | undefined): boolean {
+  return status?.state === "testing";
+}
+
+function renderConnectivityStatus(status: ConnectivityStatus | undefined) {
+  const current = status ?? { state: "idle" as const };
+  const label = current.state === "testing"
+    ? "测试中…"
+    : current.state === "success"
+      ? current.message || "连通性正常"
+      : current.state === "error"
+        ? current.message || "连通性测试失败"
+        : "尚未测试";
+  const diagnostic = current.state === "error" && current.code ? ` · 错误码：${current.code}` : "";
+  return <span className={`connectivity-status ${connectivityStatusClass(current.state)}`} aria-live="polite">{label}{diagnostic}{current.externalUrl && current.state === "success" ? <> · <a href={current.externalUrl} target="_blank" rel="noreferrer">打开会话</a></> : null}</span>;
+}
+
+function connectivityStatusClass(state: ConnectivityStatus["state"]): string {
+  if (state === "success") return "success";
+  if (state === "error") return "error";
   return "muted";
 }

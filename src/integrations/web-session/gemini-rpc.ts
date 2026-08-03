@@ -7,6 +7,8 @@ export interface GeminiWebContext {
   fSid: string;
   locale: string;
   authUser: string;
+  /** The account path resolved by the /app redirect, when present. */
+  accountPrefix?: string;
 }
 
 export interface GeminiParsedLine {
@@ -17,35 +19,44 @@ export interface GeminiParsedLine {
   choiceId?: string;
 }
 
-export const GEMINI_WEB_MODEL_HASH = "fbb127bbb056c959";
+// Current Gemini-Nexus Web catalog default (3.5 Flash). The previous hash
+// fbb127bbb056c959 is retained only in historical fixtures/documentation.
+export const GEMINI_WEB_MODEL_HASH = "56fdd199312815e2";
 const GEMINI_WEB_CAPABILITIES = [4, 5, 6, 8];
+const GEMINI_WEB_MODEL_MODE = 1;
 
-export function extractGeminiWebContext(html: string, requestedUser = "0"): GeminiWebContext {
-  const atValue = extractFromHtml("SNlM0e", html);
+export function extractGeminiWebContext(html: string, requestedUser = "0", pageUrl?: string): GeminiWebContext {
+  // Gemini-Nexus and gemini-webapi use SNlM0e as the StreamGenerate `at`
+  // token. Keep thykhd as a fallback for builds that expose only that key.
+  const atValue = extractFromHtml("SNlM0e", html) || extractFromHtml("thykhd", html);
   const blValue = extractFromHtml("cfb2h", html);
   const fSid = extractFromHtml("FdrFJe", html);
   if (!atValue || !blValue || !fSid) {
     throw new AppError("api-contract", "Gemini Web 请求参数缺失，页面协议可能已变化", { retryable: true });
   }
   const locale = html.match(/<html[^>]*\slang="([^"]+)"/)?.[1] || "en-US";
-  const authUser = html.match(/data-index="(\d+)"/)?.[1] || requestedUser || "0";
-  return { atValue, blValue, fSid, locale, authUser };
+  const accountPrefix = extractGeminiAccountPrefix(pageUrl);
+  const authUser = accountPrefix?.match(/^\/u\/(\d+)$/)?.[1]
+    || html.match(/data-index="(\d+)"/)?.[1]
+    || requestedUser
+    || "0";
+  return { atValue, blValue, fSid, locale, authUser, ...(accountPrefix ? { accountPrefix } : {}) };
 }
 
 export function buildGeminiWebRequest(prompt: string, context: GeminiWebContext): { url: string; init: RequestInit } {
   const requestId = generateRequestId();
+  const requestPayload: unknown[] = [[prompt], null, ["", "", ""]];
+  const fReq = JSON.stringify([null, JSON.stringify(requestPayload)]);
+
   const modelHeader: unknown[] = [];
   modelHeader[0] = 1;
   modelHeader[4] = GEMINI_WEB_MODEL_HASH;
   modelHeader[7] = 0;
   modelHeader[8] = GEMINI_WEB_CAPABILITIES;
-  modelHeader[11] = 1;
-  modelHeader[14] = 1;
+  modelHeader[11] = GEMINI_WEB_MODEL_MODE;
+  modelHeader[14] = GEMINI_WEB_MODEL_MODE;
   modelHeader[15] = 1;
   modelHeader[16] = requestId;
-
-  const requestPayload = [[prompt], null, ["", "", ""]];
-  const fReq = JSON.stringify([null, JSON.stringify(requestPayload)]);
   const query = new URLSearchParams({
     bl: context.blValue,
     "f.sid": context.fSid,
@@ -62,7 +73,14 @@ export function buildGeminiWebRequest(prompt: string, context: GeminiWebContext)
     "x-goog-ext-73010989-jspb": "[0]",
     "x-goog-ext-73010990-jspb": "[0,0,0]",
     Origin: "https://gemini.google.com",
-    Referer: "https://gemini.google.com/",
+    Referer: `https://gemini.google.com${accountPrefix}/app`,
+    Accept: "*/*",
+    "Accept-Language": context.locale || "en-US",
+    "Cache-Control": "no-cache",
+    Pragma: "no-cache",
+    "sec-fetch-dest": "empty",
+    "sec-fetch-mode": "cors",
+    "sec-fetch-site": "same-origin",
   };
   if (context.authUser && context.authUser !== "0") headers["X-Goog-AuthUser"] = context.authUser;
 
@@ -77,9 +95,9 @@ export function buildGeminiWebRequest(prompt: string, context: GeminiWebContext)
   };
 }
 
-export async function completeGeminiWebRpc(prompt: string, signal: AbortSignal): Promise<string> {
+export async function completeGeminiWebRpc(prompt: string, signal: AbortSignal, authUser = "0"): Promise<string> {
   let latest = "";
-  await streamGeminiWebRpc(prompt, signal, ({ text }) => { latest = text; });
+  await streamGeminiWebRpc(prompt, signal, ({ text }) => { latest = text; }, authUser);
   return latest.trim();
 }
 
@@ -87,21 +105,38 @@ export async function streamGeminiWebRpc(
   prompt: string,
   signal: AbortSignal,
   onUpdate: (update: GeminiParsedLine) => void,
+  authUser = "0",
 ): Promise<{ conversationId?: string }> {
-  const context = await fetchGeminiWebContext(signal);
-  const request = buildGeminiWebRequest(prompt, context);
-  const response = await fetch(request.url, { ...request.init, signal });
-  if (response.status === 401 || response.status === 403) {
-    throw new AppError("auth-required", "Gemini Web 登录态已失效，请重新登录", { retryable: true });
+  let context = await fetchGeminiWebContext(signal, authUser);
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    const request = buildGeminiWebRequest(prompt, context);
+    const response = await fetch(request.url, { ...request.init, signal });
+    if (response.status === 401 || response.status === 403) {
+      throw new AppError("auth-required", "Gemini Web 登录态已失效，请重新登录", { retryable: true });
+    }
+    if (!response.ok) {
+      if (attempt === 0) {
+        context = await fetchGeminiWebContext(signal, authUser);
+        continue;
+      }
+      throw new AppError("api-unavailable", `Gemini Web 请求失败（HTTP ${response.status}）`, { retryable: true });
+    }
+    try {
+      return await readGeminiWebResponseWithUpdates(response, signal, onUpdate);
+    } catch (error) {
+      if (attempt === 0 && shouldRefreshGeminiContext(error)) {
+        context = await fetchGeminiWebContext(signal, authUser);
+        continue;
+      }
+      throw error;
+    }
   }
-  if (!response.ok) {
-    throw new AppError("api-unavailable", `Gemini Web 请求失败（HTTP ${response.status}）`, { retryable: true });
-  }
-  return readGeminiWebResponseWithUpdates(response, signal, onUpdate);
+  throw new AppError("api-unavailable", "Gemini Web 请求重试失败", { retryable: true });
 }
 
-export async function fetchGeminiWebContext(signal: AbortSignal): Promise<GeminiWebContext> {
-  const response = await fetch("https://gemini.google.com/app", {
+export async function fetchGeminiWebContext(signal: AbortSignal, requestedUser = "0"): Promise<GeminiWebContext> {
+  const accountPrefix = requestedUser && requestedUser !== "0" ? `/u/${requestedUser}` : "";
+  const response = await fetch(`https://gemini.google.com${accountPrefix}/app`, {
     method: "GET",
     credentials: "include",
     headers: { Accept: "text/html" },
@@ -114,10 +149,17 @@ export async function fetchGeminiWebContext(signal: AbortSignal): Promise<Gemini
     throw new AppError("api-unavailable", `无法读取 Gemini Web 页面（HTTP ${response.status}）`, { retryable: true });
   }
   const html = await response.text();
+  if (new URL(response.url || `https://gemini.google.com${accountPrefix}/app`).origin !== "https://gemini.google.com") {
+    throw new AppError("auth-required", "Gemini Web 当前未登录，请先登录 Gemini", { retryable: true });
+  }
   if (looksLikeGeminiLoginPage(html) && !hasGeminiWebContext(html)) {
     throw new AppError("auth-required", "Gemini Web 当前未登录，请先登录 Gemini", { retryable: true });
   }
-  return extractGeminiWebContext(html);
+  const context = extractGeminiWebContext(html, requestedUser, response.url);
+  if (requestedUser !== "0" && context.authUser !== requestedUser) {
+    throw new AppError("auth-required", `Gemini Web 当前页面是账号 ${context.authUser}，已保存账号 ${requestedUser}，请重新登录绑定`, { retryable: true });
+  }
+  return context;
 }
 
 export async function readGeminiWebResponse(response: Response): Promise<string> {
@@ -156,6 +198,10 @@ async function readGeminiWebResponseWithUpdates(
       while (newlineIndex !== -1) {
         const line = buffer.slice(0, newlineIndex);
         buffer = buffer.slice(newlineIndex + 1);
+        const protocolError = parseGeminiProtocolErrorCode(line);
+        if (protocolError !== undefined) {
+          throw new AppError("api-contract", formatGeminiProtocolError(protocolError), { retryable: true });
+        }
         const parsed = parseGeminiLine(line);
         if (parsed) {
           if (parsed.text) {
@@ -168,6 +214,10 @@ async function readGeminiWebResponseWithUpdates(
       }
     }
     buffer += decoder.decode();
+    const protocolError = parseGeminiProtocolErrorCode(buffer);
+    if (protocolError !== undefined) {
+      throw new AppError("api-contract", formatGeminiProtocolError(protocolError), { retryable: true });
+    }
     const trailing = parseGeminiLine(buffer);
     if (trailing) {
       if (trailing.text) {
@@ -230,12 +280,53 @@ export function parseGeminiLine(line: string): GeminiParsedLine | null {
   return null;
 }
 
+/** Return the protocol error code from a Gemini RPC event, if present. */
+export function parseGeminiProtocolErrorCode(line: string): number | undefined {
+  try {
+    const cleanLine = line.replace(/^\)\]\}'/, "").trim();
+    if (!cleanLine) return undefined;
+    const root = JSON.parse(cleanLine) as unknown;
+    if (!Array.isArray(root)) return undefined;
+    for (const entry of root) {
+      if (!Array.isArray(entry) || entry[0] !== "e") continue;
+      const code = entry[4] ?? entry.at(-1);
+      if (typeof code === "number") return code;
+    }
+  } catch {
+    // Metadata and partial chunks are ignored by the normal parser.
+  }
+  return undefined;
+}
+
 function extractFromHtml(variableName: string, html: string): string | undefined {
-  return new RegExp(`"${variableName}":"([^"]+)"`).exec(html)?.[1];
+  return new RegExp(`"${variableName}"\\s*:\\s*"([^"]+)"`).exec(html)?.[1];
 }
 
 function hasGeminiWebContext(html: string): boolean {
-  return Boolean(extractFromHtml("SNlM0e", html) && extractFromHtml("cfb2h", html) && extractFromHtml("FdrFJe", html));
+  return Boolean((extractFromHtml("SNlM0e", html) || extractFromHtml("thykhd", html))
+    && extractFromHtml("cfb2h", html)
+    && extractFromHtml("FdrFJe", html));
+}
+
+function extractGeminiAccountPrefix(pageUrl: string | undefined): string | undefined {
+  if (!pageUrl) return undefined;
+  try {
+    const match = new URL(pageUrl).pathname.match(/(\/u\/\d+)(?:\/|$)/);
+    return match?.[1];
+  } catch {
+    return undefined;
+  }
+}
+
+function formatGeminiProtocolError(code: number): string {
+  if (code === 469) {
+    return "Gemini Web 后端拒绝了请求（协议码 469），通常表示短期上下文、模型路由或账号权限已变化；已刷新页面参数并重试一次";
+  }
+  return `Gemini Web 返回协议错误（协议码 ${code}），已刷新页面参数并重试一次`;
+}
+
+function shouldRefreshGeminiContext(error: unknown): boolean {
+  return error instanceof AppError && error.code === "api-contract" && error.retryable;
 }
 
 function mergeGeminiText(previous: string, next: string): string {

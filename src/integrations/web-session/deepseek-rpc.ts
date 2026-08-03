@@ -46,6 +46,14 @@ export function buildDeepSeekCompletionRequest(
   };
 }
 
+/**
+ * Probe the account endpoint only. This exchanges the stored user token for a
+ * short-lived access token but does not create a chat session or run PoW.
+ */
+export async function testDeepSeekWebConnection(credential: DeepSeekWebCredential, signal: AbortSignal): Promise<void> {
+  await acquireDeepSeekAccessToken(credential, signal, true);
+}
+
 export async function streamDeepSeekWebRpc(
   prompt: string,
   credential: DeepSeekWebCredential,
@@ -128,8 +136,8 @@ export async function streamDeepSeekWebRpc(
   return { sessionId, messageId };
 }
 
-async function acquireDeepSeekAccessToken(credential: DeepSeekWebCredential, signal: AbortSignal): Promise<string> {
-  const cached = deepSeekAccessTokenCache.get(credential.userToken);
+async function acquireDeepSeekAccessToken(credential: DeepSeekWebCredential, signal: AbortSignal, forceRefresh = false): Promise<string> {
+  const cached = forceRefresh ? undefined : deepSeekAccessTokenCache.get(credential.userToken);
   if (cached && cached.expiresAt > Date.now()) return cached.value;
 
   const response = await fetch(`${BASE_URL}/api/v0/users/current`, {

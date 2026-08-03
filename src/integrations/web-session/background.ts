@@ -19,6 +19,8 @@ interface WebSessionPortLike {
   postMessage(message: WebSessionPortMessage): void;
 }
 
+const CONNECTION_TEST_PROMPT = "只回复 PROJECT_OK";
+
 export function installWebSessionBackground(): void {
   const storage = createSettingsRepository();
   browser.runtime.onConnect.addListener((port) => {
@@ -39,13 +41,53 @@ function handlePort(port: WebSessionPortLike, storage: ReturnType<typeof createS
     if (requests.has(message.requestId)) return;
     const controller = new AbortController();
     requests.set(message.requestId, controller);
-    void runRequest(port, storage, message.requestId, message.providerId, message.prompt, controller.signal)
-      .finally(() => requests.delete(message.requestId));
+    const task = message.type === "test"
+      ? runTest(port, storage, message.requestId, message.providerId, controller.signal)
+      : runRequest(port, storage, message.requestId, message.providerId, message.prompt, controller.signal);
+    void task.finally(() => requests.delete(message.requestId));
   });
   port.onDisconnect.addListener(() => {
     for (const controller of requests.values()) controller.abort(new DOMException("Aborted", "AbortError"));
     requests.clear();
   });
+}
+
+async function runTest(
+  port: WebSessionPortLike,
+  storage: ReturnType<typeof createSettingsRepository>,
+  requestId: string,
+  providerId: WebSessionProviderId,
+  signal: AbortSignal,
+): Promise<void> {
+  try {
+    const credential = await storage.getWebSessionCredential(providerId);
+    if (!credential) {
+      throw new AppError(
+        "auth-required",
+        `请先点击“登录 ${providerLabel(providerId)}”采集登录态；当前扩展中没有可用凭据`,
+        { retryable: true },
+      );
+    }
+    const result = await executeProviderStream(providerId, credential, CONNECTION_TEST_PROMPT, signal);
+    if (!result.text.includes("PROJECT_OK")) {
+      throw new AppError("api-contract", `${providerLabel(providerId)} 未返回 PROJECT_OK，实际会话测试失败`, { retryable: true });
+    }
+    if (!signal.aborted) {
+      postMessage(port, {
+        type: "done",
+        requestId,
+        message: `${providerLabel(providerId)} 实际会话测试成功，已收到 PROJECT_OK`,
+        ...(result.externalUrl ? { externalUrl: result.externalUrl } : {}),
+      });
+    }
+  } catch (error) {
+    if (signal.aborted || isAbortError(error)) return;
+    const appError = toAppError(error);
+    if (appError.code === "auth-required" || appError.code === "token-refresh-failed") {
+      await storage.clearWebSessionCredential(providerId).catch(() => undefined);
+    }
+    postMessage(port, { type: "error", requestId, error: serializeAppError(appError) });
+  }
 }
 
 async function runRequest(
@@ -62,18 +104,8 @@ async function runRequest(
     const onUpdate = (text: string) => {
       if (!signal.aborted && text) postMessage(port, { type: "snapshot", requestId, text });
     };
-    let externalUrl: string | undefined;
-    if (providerId === "chatgpt-web") {
-      const result = await streamChatGptWebRpc(prompt, credentialForChatGpt(credential), signal, ({ text }) => onUpdate(text));
-      externalUrl = result.conversationId ? `https://chatgpt.com/c/${encodeURIComponent(result.conversationId)}` : undefined;
-    } else if (providerId === "gemini-web") {
-      const result = await streamGeminiWebRpc(prompt, signal, ({ text }) => onUpdate(text));
-      externalUrl = result.conversationId ? `https://gemini.google.com/app/${encodeURIComponent(stripGeminiConversationPrefix(result.conversationId))}` : undefined;
-    } else {
-      const result = await streamDeepSeekWebRpc(prompt, credentialForDeepSeek(credential), signal, ({ text }) => onUpdate(text));
-      externalUrl = `https://chat.deepseek.com/a/chat/s/${encodeURIComponent(result.sessionId)}`;
-    }
-    if (!signal.aborted) postMessage(port, { type: "done", requestId, ...(externalUrl ? { externalUrl } : {}) });
+    const result = await executeProviderStream(providerId, credential, prompt, signal, onUpdate);
+    if (!signal.aborted) postMessage(port, { type: "done", requestId, ...(result.externalUrl ? { externalUrl: result.externalUrl } : {}) });
   } catch (error) {
     if (signal.aborted || isAbortError(error)) return;
     const appError = toAppError(error);
@@ -82,6 +114,45 @@ async function runRequest(
     }
     postMessage(port, { type: "error", requestId, error: serializeAppError(appError) });
   }
+}
+
+async function executeProviderStream(
+  providerId: WebSessionProviderId,
+  credential: WebSessionCredential,
+  prompt: string,
+  signal: AbortSignal,
+  onUpdate: (text: string) => void = () => undefined,
+): Promise<{ text: string; externalUrl?: string }> {
+  let latestText = "";
+  const update = (text: string) => {
+    latestText = text;
+    onUpdate(text);
+  };
+  if (providerId === "chatgpt-web") {
+    // ChatGPT binds the bearer token to the browser session. Read the current
+    // cookies only for this request; never persist or log them.
+    const requestContext = await readChatGptRequestContext();
+    const result = await streamChatGptWebRpc(prompt, {
+      ...credentialForChatGpt(credential),
+      ...requestContext,
+    }, signal, ({ text }) => update(text));
+    return {
+      text: latestText,
+      ...(result.conversationId ? { externalUrl: `https://chatgpt.com/c/${encodeURIComponent(result.conversationId)}` } : {}),
+    };
+  }
+  if (providerId === "gemini-web") {
+    const result = await streamGeminiWebRpc(prompt, signal, ({ text }) => update(text), credentialForGemini(credential).authUser);
+    return {
+      text: latestText,
+      ...(result.conversationId ? { externalUrl: `https://gemini.google.com/app/${encodeURIComponent(stripGeminiConversationPrefix(result.conversationId))}` } : {}),
+    };
+  }
+  const result = await streamDeepSeekWebRpc(prompt, credentialForDeepSeek(credential), signal, ({ text }) => update(text));
+  return {
+    text: latestText,
+    externalUrl: `https://chat.deepseek.com/a/chat/s/${encodeURIComponent(result.sessionId)}`,
+  };
 }
 
 function postMessage(port: WebSessionPortLike, message: WebSessionPortMessage): void {
@@ -95,6 +166,37 @@ function postMessage(port: WebSessionPortLike, message: WebSessionPortMessage): 
 function credentialForChatGpt(credential: WebSessionCredential): { accessToken: string } {
   if (credential.providerId !== "chatgpt-web") throw new AppError("auth-required", "ChatGPT Web 登录态不存在");
   return { accessToken: credential.accessToken };
+}
+
+function credentialForGemini(credential: WebSessionCredential): { authUser: string } {
+  if (credential.providerId !== "gemini-web") throw new AppError("auth-required", "Gemini Web 登录态不存在");
+  return { authUser: credential.authUser || "0" };
+}
+
+interface ChatGptCookie {
+  name: string;
+  value: string;
+}
+
+async function readChatGptRequestContext(): Promise<{ cookieHeader?: string; deviceId?: string }> {
+  try {
+    const cookieApi = browser.cookies;
+    if (!cookieApi?.getAll) return {};
+    const cookies = await cookieApi.getAll({ url: "https://chatgpt.com/" }) as ChatGptCookie[];
+    const cookieHeader = cookies
+      .filter((cookie) => cookie.name && typeof cookie.value === "string")
+      .map((cookie) => `${cookie.name}=${cookie.value}`)
+      .join("; ");
+    const deviceId = cookies.find((cookie) => cookie.name === "oai-did")?.value;
+    return {
+      ...(cookieHeader ? { cookieHeader } : {}),
+      ...(deviceId ? { deviceId } : {}),
+    };
+  } catch {
+    // The extension can still use credentials: include when the optional
+    // cookies permission has not been granted yet.
+    return {};
+  }
 }
 
 function credentialForDeepSeek(credential: WebSessionCredential): { userToken: string } {
