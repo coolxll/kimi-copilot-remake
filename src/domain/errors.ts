@@ -19,13 +19,17 @@ export class AppError extends Error {
   readonly code: AppErrorCode;
   readonly cause?: unknown;
   readonly retryable: boolean;
+  readonly diagnostic?: unknown;
+  readonly externalUrl?: string;
 
-  constructor(code: AppErrorCode, message: string, options: { cause?: unknown; retryable?: boolean } = {}) {
+  constructor(code: AppErrorCode, message: string, options: { cause?: unknown; retryable?: boolean; diagnostic?: unknown; externalUrl?: string } = {}) {
     super(message);
     this.name = "AppError";
     this.code = code;
     this.cause = options.cause;
     this.retryable = options.retryable ?? false;
+    this.diagnostic = options.diagnostic;
+    this.externalUrl = options.externalUrl;
   }
 }
 

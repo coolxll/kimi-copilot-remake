@@ -7,6 +7,7 @@ import { AppError, toAppError } from "../../domain/errors";
 import { ensureApiHostPermission, normalizeApiRoot, revokeApiHostPermission, shouldRevokeApiHostPermission, validateApiRoot } from "../../platform/chrome/permissions";
 import { createAppServices } from "../../application/services";
 import type { WebSessionLoginStatus } from "../../integrations/web-session/client";
+import { isGeminiDiagnosticReport, type GeminiDiagnosticEvent, type GeminiDiagnosticMode, type GeminiDiagnosticReport } from "../../integrations/web-session/gemini-diagnostics";
 import { WEB_SESSION_PROVIDER_IDS } from "../../integrations/web-session/specs";
 import { ProviderBadge, ProviderIcon, ProviderPicker } from "../components/provider-brand";
 import "../styles.css";
@@ -23,8 +24,13 @@ export function OptionsApp() {
   const [webStatuses, setWebStatuses] = useState<Record<WebSessionProviderId, WebSessionLoginStatus>>(createInitialWebSessionStatuses);
   const [checkingWebStatus, setCheckingWebStatus] = useState<WebSessionProviderId | "all" | null>(null);
   const [connectionStatuses, setConnectionStatuses] = useState<Record<ProviderId, ConnectivityStatus>>(createInitialConnectivityStatuses);
+  const [geminiDiagnosticReports, setGeminiDiagnosticReports] = useState<GeminiDiagnosticReport[]>([]);
+  const [geminiDiagnosticReport, setGeminiDiagnosticReport] = useState<GeminiDiagnosticReport>();
+  const [geminiDiagnosticEvents, setGeminiDiagnosticEvents] = useState<GeminiDiagnosticEvent[]>([]);
+  const [geminiDiagnosticMode, setGeminiDiagnosticMode] = useState<GeminiDiagnosticMode>();
   const loginControllerRef = useRef<AbortController | undefined>(undefined);
   const connectionControllersRef = useRef(new Map<ProviderId, AbortController>());
+  const geminiDiagnosticControllerRef = useRef<AbortController | undefined>(undefined);
   const [notice, setNotice] = useState<{ kind: "success" | "error"; text: string }>();
   const [saving, setSaving] = useState(false);
 
@@ -48,12 +54,15 @@ export function OptionsApp() {
         const loaded = await services.storage.getSettings();
         const secret = await services.storage.getOpenAISecret();
         const kimi = await services.storage.getKimiTokens();
+        const diagnosticReports = await services.storage.getGeminiDiagnosticReports();
         setSettings(loaded);
         setDefaultProvider(loaded.defaultProvider);
         setPrompt(loaded.promptOverride || DEFAULT_PROMPT);
         setConfig(loaded.openAICompatible || { apiRoot: "", model: "", chunkChars: DEFAULT_CHUNK_CHARS, maxSourceChars: DEFAULT_MAX_SOURCE_CHARS });
         setHasToken(Boolean(secret?.apiToken));
         setHasKimiToken(Boolean(kimi?.refreshToken));
+        setGeminiDiagnosticReports(diagnosticReports);
+        setGeminiDiagnosticReport(diagnosticReports[0]);
       } catch (error) {
         setNotice({ kind: "error", text: toAppError(error).message });
       }
@@ -62,6 +71,7 @@ export function OptionsApp() {
     return () => {
       loginControllerRef.current?.abort("options closed");
       for (const controller of connectionControllersRef.current.values()) controller.abort("options closed");
+      geminiDiagnosticControllerRef.current?.abort("options closed");
     };
     // Services are stable for this options page.
   }, []);
@@ -144,7 +154,7 @@ export function OptionsApp() {
         const appError = toAppError(error);
         setConnectionStatuses((current) => ({
           ...current,
-          [providerId]: { state: "error", message: appError.message, code: appError.code },
+          [providerId]: { state: "error", message: appError.message, code: appError.code, ...(appError.externalUrl ? { externalUrl: appError.externalUrl } : {}) },
         }));
       }
     } finally {
@@ -197,6 +207,59 @@ export function OptionsApp() {
     setNotice({ kind: "success", text: `${PROVIDER_LABELS[providerId]} 登录态已清除` });
   };
 
+  const runGeminiDiagnostic = async (mode: GeminiDiagnosticMode) => {
+    geminiDiagnosticControllerRef.current?.abort("new Gemini diagnostic");
+    const controller = new AbortController();
+    geminiDiagnosticControllerRef.current = controller;
+    setGeminiDiagnosticMode(mode);
+    setGeminiDiagnosticEvents([]);
+    setNotice(undefined);
+    try {
+      const report = await services.webSessions.diagnoseGemini(mode, controller.signal, (event) => {
+        setGeminiDiagnosticEvents((current) => [...current, event].slice(-96));
+      });
+      if (controller.signal.aborted) return;
+      setGeminiDiagnosticReport(report);
+      setGeminiDiagnosticReports((current) => [report, ...current.filter((item) => item.runId !== report.runId)].slice(0, 10));
+      await services.storage.saveGeminiDiagnosticReport(report);
+    } catch (error) {
+      if (controller.signal.aborted) return;
+      const appError = toAppError(error);
+      const report = isGeminiDiagnosticReport(appError.diagnostic) ? appError.diagnostic : undefined;
+      if (report) {
+        setGeminiDiagnosticReport(report);
+        setGeminiDiagnosticReports((current) => [report, ...current.filter((item) => item.runId !== report.runId)].slice(0, 10));
+        await services.storage.saveGeminiDiagnosticReport(report);
+      }
+      setNotice({ kind: "error", text: `${appError.message}${appError.code ? ` · 错误码：${appError.code}` : ""}` });
+    } finally {
+      if (geminiDiagnosticControllerRef.current === controller) {
+        geminiDiagnosticControllerRef.current = undefined;
+        setGeminiDiagnosticMode(undefined);
+      }
+    }
+  };
+
+  const clearGeminiDiagnostics = async () => {
+    await services.storage.clearGeminiDiagnosticReports();
+    setGeminiDiagnosticReports([]);
+    setGeminiDiagnosticReport(undefined);
+    setGeminiDiagnosticEvents([]);
+    setNotice({ kind: "success", text: "Gemini 诊断历史已清除" });
+  };
+
+  const copyGeminiDiagnostics = async () => {
+    const report = geminiDiagnosticReport || geminiDiagnosticReports[0];
+    if (!report) return;
+    try {
+      const { externalUrl: _externalUrl, ...safeReport } = report;
+      await navigator.clipboard.writeText(JSON.stringify(safeReport, null, 2));
+      setNotice({ kind: "success", text: "已复制脱敏 Gemini 诊断 JSON" });
+    } catch (error) {
+      setNotice({ kind: "error", text: `复制诊断信息失败：${toAppError(error).message}` });
+    }
+  };
+
   const openExtractorTest = () => void browser.tabs.create({ url: browser.runtime.getURL("/") + "youtube-test.html" });
 
   if (!settings) return <main className="page"><div className="panel">加载中…</div></main>;
@@ -222,8 +285,16 @@ export function OptionsApp() {
       <div className="actions">{WEB_SESSION_PROVIDER_IDS.map((providerId) => {
         const status = webStatuses[providerId];
         const isChecking = checkingWebStatus === "all" || checkingWebStatus === providerId;
-        return <span key={providerId} className="web-session-action-group"><span className="web-session-provider"><ProviderBadge providerId={providerId} /><span className={webSessionStatusClass(status)}>{isChecking ? "检测中…" : WEB_SESSION_STATUS_LABELS[status]}</span></span><button className="button provider-button" onClick={() => void openWebSession(providerId)}><ProviderIcon providerId={providerId} />{status === "logged-in" || status === "page-logged-in" || status === "saved-unverified" ? `更新 ${PROVIDER_LABELS[providerId]}` : `登录 ${PROVIDER_LABELS[providerId]}`}</button><button className="button" disabled={isChecking} onClick={() => void refreshWebSessionStatuses(providerId)}>检测登录态</button><button className="button" disabled={isConnectionTesting(connectionStatuses[providerId])} onClick={() => void testProviderConnection(providerId)}>{isConnectionTesting(connectionStatuses[providerId]) ? "测试中…" : "发送会话测试"}</button>{renderConnectivityStatus(connectionStatuses[providerId])}{status === "logged-in" || status === "saved-unverified" ? <button className="button danger" onClick={() => void clearWebSession(providerId)}>清除</button> : null}</span>;
+        return <div key={providerId} className="web-session-action-group"><span className="web-session-provider"><ProviderBadge providerId={providerId} /><span className={webSessionStatusClass(status)}>{isChecking ? "检测中…" : WEB_SESSION_STATUS_LABELS[status]}</span></span><button className="button provider-button" onClick={() => void openWebSession(providerId)}><ProviderIcon providerId={providerId} />{status === "logged-in" || status === "page-logged-in" || status === "saved-unverified" ? `更新 ${PROVIDER_LABELS[providerId]}` : `登录 ${PROVIDER_LABELS[providerId]}`}</button><button className="button" disabled={isChecking} onClick={() => void refreshWebSessionStatuses(providerId)}>检测登录态</button><button className="button" disabled={isConnectionTesting(connectionStatuses[providerId])} onClick={() => void testProviderConnection(providerId)}>{isConnectionTesting(connectionStatuses[providerId]) ? "测试中…" : "发送会话测试"}</button>{renderConnectivityStatus(connectionStatuses[providerId])}{status === "logged-in" || status === "saved-unverified" ? <button className="button danger" onClick={() => void clearWebSession(providerId)}>清除</button> : null}</div>;
       })}</div>
+      <div className="gemini-diagnostic-box">
+        <div className="gemini-diagnostic-heading"><div><h3>Gemini 调试诊断</h3><p className="muted">只在这里发送 PROJECT_OK 测试，不影响正常总结。事件与响应结构会脱敏保存最近 10 次。</p></div><span className="muted">{geminiDiagnosticReports.length ? `历史 ${geminiDiagnosticReports.length} 条` : "暂无历史"}</span></div>
+        <div className="actions gemini-diagnostic-actions"><button className="button" disabled={Boolean(geminiDiagnosticMode)} onClick={() => void runGeminiDiagnostic("context")}>{geminiDiagnosticMode === "context" ? "检查中…" : "检查上下文"}</button><button className="button" disabled={Boolean(geminiDiagnosticMode)} onClick={() => void runGeminiDiagnostic("background")}>{geminiDiagnosticMode === "background" ? "测试中…" : "诊断后台请求"}</button><button className="button" disabled={Boolean(geminiDiagnosticMode)} onClick={() => void runGeminiDiagnostic("page")}>{geminiDiagnosticMode === "page" ? "测试中…" : "页面同源对照"}</button>{(geminiDiagnosticReport || geminiDiagnosticReports.length > 0) && <button className="button" onClick={() => void copyGeminiDiagnostics()}>复制诊断 JSON</button>}<button className="button danger" disabled={geminiDiagnosticReports.length === 0} onClick={() => void clearGeminiDiagnostics()}>清除历史</button></div>
+        {geminiDiagnosticMode && geminiDiagnosticEvents.length > 0 && <DiagnosticTimeline events={geminiDiagnosticEvents} live />}
+        {geminiDiagnosticReport && <GeminiDiagnosticReportView report={geminiDiagnosticReport} />}
+        {!geminiDiagnosticReport && geminiDiagnosticReports[0] && <GeminiDiagnosticReportView report={geminiDiagnosticReports[0]} />}
+        {geminiDiagnosticReports.length > 1 && <details className="gemini-diagnostic-history"><summary>查看最近诊断</summary><div>{geminiDiagnosticReports.map((report) => <button key={report.runId} className="gemini-diagnostic-history-item" onClick={() => setGeminiDiagnosticReport(report)}><span className={`gemini-diagnostic-outcome ${report.outcome}`}>{report.outcome === "success" ? "成功" : report.outcome === "warning" ? "警告" : "失败"}</span><span>{report.summary}</span><span className="muted">{new Date(report.endedAt).toLocaleString()}</span></button>)}</div></details>}
+      </div>
     </section>
     <section className="card">
       <h2 className="provider-heading"><ProviderIcon providerId="openai-compatible" /> OpenAI Compatible</h2><p className="warning">这是个人/内部 BYOK 模式。Token 会保存在本机扩展存储中，并随请求发送到你配置的服务。</p>
@@ -235,6 +306,23 @@ export function OptionsApp() {
     </section>
     <div className="actions"><button className="button primary" disabled={saving} onClick={() => void save()}>{saving ? "保存中…" : "保存全部设置"}</button></div>
   </div></main>;
+}
+
+function GeminiDiagnosticReportView({ report }: { report: GeminiDiagnosticReport }) {
+  const outcomeLabel = report.outcome === "success" ? "成功" : report.outcome === "warning" ? "有警告" : "失败";
+  return <div className="gemini-diagnostic-report">
+    <div className="gemini-diagnostic-summary"><span className={`gemini-diagnostic-outcome ${report.outcome}`}>{outcomeLabel}</span><span>{report.summary}</span>{report.externalUrl && <a href={report.externalUrl} target="_blank" rel="noreferrer">打开测试会话</a>}<span className="muted">{new Date(report.endedAt).toLocaleString()}</span></div>
+    <DiagnosticTimeline events={report.events} />
+  </div>;
+}
+
+function DiagnosticTimeline({ events, live = false }: { events: GeminiDiagnosticEvent[]; live?: boolean }) {
+  return <div className="gemini-diagnostic-timeline" aria-live={live ? "polite" : undefined}>
+    {events.map((event) => <div key={`${event.sequence}-${event.at}`} className={`gemini-diagnostic-event ${event.status}`}>
+      <span className="gemini-diagnostic-event-marker" />
+      <div className="gemini-diagnostic-event-content"><div><strong>{event.stage}</strong><span className="muted"> · {event.status}</span>{typeof event.attempt === "number" && <span className="muted"> · 尝试 {event.attempt}</span>}</div><div>{event.message}</div>{event.details && <pre>{JSON.stringify(event.details)}</pre>}</div>
+    </div>)}
+  </div>;
 }
 
 function normalizeConfig(config: OpenAICompatibleConfig): OpenAICompatibleConfig {
@@ -296,7 +384,7 @@ function renderConnectivityStatus(status: ConnectivityStatus | undefined) {
         ? current.message || "连通性测试失败"
         : "尚未测试";
   const diagnostic = current.state === "error" && current.code ? ` · 错误码：${current.code}` : "";
-  return <span className={`connectivity-status ${connectivityStatusClass(current.state)}`} aria-live="polite">{label}{diagnostic}{current.externalUrl && current.state === "success" ? <> · <a href={current.externalUrl} target="_blank" rel="noreferrer">打开会话</a></> : null}</span>;
+  return <span className={`connectivity-status ${connectivityStatusClass(current.state)}`} aria-live="polite">{label}{diagnostic}{current.externalUrl ? <> · <a href={current.externalUrl} target="_blank" rel="noreferrer">打开会话</a></> : null}</span>;
 }
 
 function connectivityStatusClass(state: ConnectivityStatus["state"]): string {

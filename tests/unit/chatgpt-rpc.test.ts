@@ -33,6 +33,16 @@ describe("ChatGPT Web session RPC", () => {
     expect((body.messages as Array<{ content: { parts: string[] } }>)[0].content.parts).toEqual(["只回复 PROJECT_OK"]);
   });
 
+  it("adds an uploaded file reference to the conversation metadata", () => {
+    const request = buildChatGptWebRequest("请总结附件", "access-token", {
+      fileReference: { id: "file_1", mimeType: "text/plain", name: "notes.txt", size: 128 },
+    });
+    const body = JSON.parse(String(request.init.body)) as Record<string, unknown>;
+    const message = (body.messages as Array<{ metadata: { attachments: Array<Record<string, unknown>> } }>)[0];
+
+    expect(message.metadata.attachments).toEqual([{ id: "file_1", mime_type: "text/plain", name: "notes.txt", size: 128 }]);
+  });
+
   it("prepares models, Sentinel requirements and account capabilities", async () => {
     const fetchMock = vi.fn(async (input: RequestInfo | URL, _init?: RequestInit) => {
       const url = String(input);
@@ -208,5 +218,37 @@ describe("ChatGPT Web session RPC", () => {
     expect(headers.Cookie).toBe("oai-did=device-id; session=browser");
     expect(headers["Openai-Sentinel-Chat-Requirements-Token"]).toBe("requirements-token");
     expect(headers["Openai-Sentinel-Proof-Token"]).toMatch(/^gAAAAAB/);
+  });
+
+  it("uploads a file before sending the attached conversation", async () => {
+    const fetchMock = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url.endsWith("/models")) return Promise.resolve(new Response(JSON.stringify({ models: [{ slug: "auto" }] }), { status: 200 }));
+      if (url.includes("/sentinel/chat-requirements")) return Promise.resolve(new Response(JSON.stringify({ token: "requirements-token" }), { status: 200 }));
+      if (url.includes("/accounts/check/")) return Promise.resolve(new Response("{}", { status: 200 }));
+      if (url.endsWith("/backend-api/files")) return Promise.resolve(new Response(JSON.stringify({ file_id: "file_1", upload_url: "https://blob.example/upload" }), { status: 201 }));
+      if (url === "https://blob.example/upload") return Promise.resolve(new Response("", { status: 201 }));
+      if (url.endsWith("/files/file_1/uploaded")) return Promise.resolve(new Response(JSON.stringify({ status: "success" }), { status: 200 }));
+      expect(init?.method).toBe("POST");
+      return Promise.resolve(new Response([
+        'data: {"conversation_id":"conversation-file","message":{"content":{"parts":["PROJECT_OK"]}}}\n',
+        "data: [DONE]\n",
+      ].join(""), { status: 200, headers: { "content-type": "text/event-stream" } }));
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const file = {
+      name: "notes.txt",
+      type: "text/plain",
+      size: 5,
+      data: new TextEncoder().encode("hello").buffer as ArrayBuffer,
+    };
+    await expect(streamChatGptWebRpc("请总结附件", { accessToken: "access-token" }, new AbortController().signal, () => undefined, file))
+      .resolves.toEqual({ conversationId: "conversation-file" });
+
+    expect(fetchMock).toHaveBeenCalledTimes(7);
+    const completionBody = JSON.parse(String(fetchMock.mock.calls[6]?.[1]?.body)) as Record<string, unknown>;
+    expect((completionBody.messages as Array<{ metadata: { attachments: unknown[] } }>)[0].metadata.attachments).toHaveLength(1);
+    expect(fetchMock.mock.calls[4]?.[1]?.method).toBe("PUT");
   });
 });

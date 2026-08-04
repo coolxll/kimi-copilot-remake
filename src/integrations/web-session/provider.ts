@@ -39,17 +39,43 @@ YouTube 视频链接：${request.document.sourceUrl}`;
       return;
     }
 
-    if (!request.document.sourceText.trim()) throw new AppError("extraction-failed", `${getWebSessionSpec(this.id).label} 需要可读取的正文文本`);
-    if (request.document.uploadFile) warnings.push(`${getWebSessionSpec(this.id).label} 不使用文件上传，已改用提取到的正文文本`);
-    const limited = trimSourceToLimit(request.document.sourceText, MAX_WEB_SESSION_SOURCE_CHARS);
-    if (limited.truncated) warnings.push(`正文超过 ${MAX_WEB_SESSION_SOURCE_CHARS} 字符，已按首尾内容截断`);
+    const label = getWebSessionSpec(this.id).label;
+    const sourceText = request.document.sourceText;
+    const uploadFile = shouldUploadWebSessionFile(request.document.uploadFile, sourceText)
+      ? request.document.uploadFile
+      : undefined;
+    if (!sourceText.trim() && !uploadFile) throw new AppError("extraction-failed", `${label} 需要可读取的正文文本或文件`);
+    const limited = trimSourceToLimit(sourceText, MAX_WEB_SESSION_SOURCE_CHARS);
+    if (uploadFile) {
+      warnings.push(`${label} 将把超长正文作为文件上传，避免把完整正文塞入对话上下文`);
+    } else if (limited.truncated) {
+      warnings.push(`正文超过 ${MAX_WEB_SESSION_SOURCE_CHARS} 字符，已按首尾内容截断`);
+    }
     for (const warning of warnings) yield { type: "warning", message: warning };
 
+    if (uploadFile) yield { type: "phase", phase: "uploading", current: 1, total: 1 };
     yield { type: "phase", phase: "summarizing", current: 1, total: 1 };
-    const prompt = `${request.prompt}\n\n请基于以下页面内容完成总结。保留事实、结构和关键细节，不要提及“页面内容”或本次提取过程。\n\n标题：${request.document.title}\n来源：${request.document.sourceUrl}\n\n正文：\n${limited.text}`;
-    for await (const event of this.client.stream(this.id, prompt, signal)) {
-      if (event.type === "snapshot") yield { type: "snapshot", text: event.text };
-      else yield { type: "done", externalUrl: event.externalUrl };
+    const prompt = uploadFile
+      ? `${request.prompt}\n\n请阅读随附文件并完成总结。保留事实、结构和关键细节，不要提及“页面内容”、文件上传或本次提取过程。\n\n标题：${request.document.title}\n来源：${request.document.sourceUrl}\n文件名：${request.document.uploadFile?.name || "document"}`
+      : `${request.prompt}\n\n请基于以下页面内容完成总结。保留事实、结构和关键细节，不要提及“页面内容”或本次提取过程。\n\n标题：${request.document.title}\n来源：${request.document.sourceUrl}\n\n正文：\n${limited.text}`;
+    try {
+      for await (const event of this.client.stream(this.id, prompt, signal, uploadFile || undefined)) {
+        if (event.type === "snapshot") yield { type: "snapshot", text: event.text };
+        else yield { type: "done", externalUrl: event.externalUrl };
+      }
+    } catch (error) {
+      if (!uploadFile || !sourceText.trim() || !(error instanceof AppError) || error.code !== "upload-failed") throw error;
+      yield { type: "warning", message: `${label} 文件上传失败，已退回正文截断方式` };
+      yield { type: "phase", phase: "summarizing", current: 1, total: 1 };
+      const fallbackPrompt = `${request.prompt}\n\n请基于以下页面内容完成总结。保留事实、结构和关键细节，不要提及“页面内容”或本次提取过程。\n\n标题：${request.document.title}\n来源：${request.document.sourceUrl}\n\n正文：\n${limited.text}`;
+      for await (const event of this.client.stream(this.id, fallbackPrompt, signal)) {
+        if (event.type === "snapshot") yield { type: "snapshot", text: event.text };
+        else yield { type: "done", externalUrl: event.externalUrl };
+      }
     }
   }
+}
+
+function shouldUploadWebSessionFile(file: File | undefined, sourceText: string): file is File {
+  return Boolean(file && (!sourceText.trim() || sourceText.length > MAX_WEB_SESSION_SOURCE_CHARS));
 }

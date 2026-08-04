@@ -22,7 +22,7 @@ const browserMock = vi.hoisted(() => ({
 
 vi.mock("wxt/browser", () => ({ browser: browserMock }));
 
-import { WebSessionClient } from "../../src/integrations/web-session/client";
+import { readWebSessionCredential, WebSessionClient } from "../../src/integrations/web-session/client";
 import type { SettingsRepository } from "../../src/platform/chrome/storage";
 
 function makeStorage(overrides: Partial<SettingsRepository> = {}): SettingsRepository {
@@ -38,6 +38,9 @@ function makeStorage(overrides: Partial<SettingsRepository> = {}): SettingsRepos
     getWebSessionCredential: vi.fn(async () => ({ providerId: "chatgpt-web" as const, accessToken: "saved-token", capturedAt: Date.now() })),
     saveWebSessionCredential: vi.fn(),
     clearWebSessionCredential: vi.fn(),
+    getGeminiDiagnosticReports: vi.fn(async () => []),
+    saveGeminiDiagnosticReport: vi.fn(),
+    clearGeminiDiagnosticReports: vi.fn(),
     ...overrides,
   };
 }
@@ -46,6 +49,134 @@ describe("WebSessionClient", () => {
   afterEach(() => {
     vi.clearAllMocks();
     vi.unstubAllGlobals();
+  });
+
+  it("reads Gemini credentials from the live page context before requesting /app", async () => {
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+    vi.stubGlobal("location", {
+      origin: "https://gemini.google.com",
+      pathname: "/u/2/app",
+      href: "https://gemini.google.com/u/2/app",
+    });
+    vi.stubGlobal("window", {
+      WIZ_global_data: {
+        requestContext: {
+          SNlM0e: "page-at",
+          cfb2h: "page-bl",
+          FdrFJe: "page-sid",
+        },
+      },
+    });
+    vi.stubGlobal("document", {
+      documentElement: { outerHTML: "<html data-index='2'></html>" },
+      scripts: [],
+      querySelector: vi.fn(() => null),
+    });
+
+    await expect(readWebSessionCredential("gemini-web")).resolves.toMatchObject({
+      status: "ok",
+      credential: { providerId: "gemini-web", authUser: "2", capturedAt: expect.any(Number) },
+    });
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("accepts compatible Gemini page-field encodings", async () => {
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+    vi.stubGlobal("location", {
+      origin: "https://gemini.google.com",
+      pathname: "/app",
+      href: "https://gemini.google.com/app",
+    });
+    vi.stubGlobal("window", {});
+    vi.stubGlobal("document", {
+      documentElement: {
+        outerHTML: "<script>{'SNlM0e':'page-at', cfb2h:\"page-bl\", [\"FdrFJe\", \"page-sid\"]}</script>",
+      },
+      scripts: [],
+      querySelector: vi.fn(() => null),
+    });
+
+    await expect(readWebSessionCredential("gemini-web")).resolves.toMatchObject({
+      status: "ok",
+      credential: { providerId: "gemini-web", authUser: "0" },
+    });
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("uses a hydrated Gemini composer as a page-login fallback", async () => {
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+    vi.stubGlobal("location", {
+      origin: "https://gemini.google.com",
+      pathname: "/app",
+      href: "https://gemini.google.com/app",
+    });
+    vi.stubGlobal("window", {});
+    vi.stubGlobal("document", {
+      documentElement: { outerHTML: "" },
+      scripts: [],
+      querySelector: vi.fn((selector: string) => selector.includes("rich-textarea") ? {} : null),
+    });
+
+    await expect(readWebSessionCredential("gemini-web")).resolves.toMatchObject({
+      status: "ok",
+      credential: { providerId: "gemini-web", authUser: "0" },
+    });
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("falls back to a compatible /app response when the current page is not hydrated", async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      url: "https://gemini.google.com/app",
+      text: async () => "<script>\"thykhd\":\"fetched-at\", cfb2h:'fetched-bl', [\"FdrFJe\", \"fetched-sid\"]</script>",
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    vi.stubGlobal("location", {
+      origin: "https://gemini.google.com",
+      pathname: "/app",
+      href: "https://gemini.google.com/app",
+    });
+    vi.stubGlobal("window", {});
+    vi.stubGlobal("document", {
+      documentElement: { outerHTML: "" },
+      scripts: [],
+      querySelector: vi.fn(() => null),
+    });
+
+    await expect(readWebSessionCredential("gemini-web")).resolves.toMatchObject({
+      status: "ok",
+      credential: { providerId: "gemini-web", authUser: "0" },
+    });
+    expect(fetchMock).toHaveBeenCalledWith("/app", { credentials: "include", headers: { Accept: "text/html" } });
+  });
+
+  it("does not turn a same-origin protocol-shape change into logged-out", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      url: "https://gemini.google.com/app",
+      text: async () => "<html><body>Gemini</body></html>",
+    }));
+    vi.stubGlobal("location", {
+      origin: "https://gemini.google.com",
+      pathname: "/app",
+      href: "https://gemini.google.com/app",
+    });
+    vi.stubGlobal("window", {});
+    vi.stubGlobal("document", {
+      documentElement: { outerHTML: "" },
+      scripts: [],
+      querySelector: vi.fn(() => null),
+    });
+
+    await expect(readWebSessionCredential("gemini-web")).resolves.toMatchObject({
+      status: "failed",
+      message: "Gemini 页面未提供可识别的登录上下文，页面协议可能已变化",
+    });
   });
 
   it("requires a saved credential before opening a background stream", async () => {
@@ -85,6 +216,35 @@ describe("WebSessionClient", () => {
     ]);
     expect(port.disconnect).toHaveBeenCalledOnce();
     expect(disconnectListeners).toHaveLength(1);
+  });
+
+  it("serializes a long-document file into the background stream request", async () => {
+    browserMock.permissions.contains.mockResolvedValue(true);
+    const listeners: Array<(message: unknown) => void> = [];
+    const port = {
+      onMessage: { addListener: (listener: (message: unknown) => void) => listeners.push(listener) },
+      onDisconnect: { addListener: vi.fn() },
+      postMessage: vi.fn((message: { type: string; requestId?: string; file?: { name: string; type: string; size: number }; data?: string }) => {
+        if (message.type === "start" && message.requestId) {
+          expect(message.file).toMatchObject({ name: "article.md", type: "text/markdown", size: 5 });
+          return;
+        }
+        if (message.type !== "file-chunk" || !message.requestId) return;
+        expect(message.data).toBe("aGVsbG8=");
+        listeners.forEach((listener) => listener({ type: "done", requestId: message.requestId }));
+      }),
+      disconnect: vi.fn(),
+    };
+    browserMock.runtime.connect.mockReturnValue(port);
+
+    const file = new File(["hello"], "article.md", { type: "text/markdown" });
+    const events = [];
+    for await (const event of new WebSessionClient(makeStorage()).stream("chatgpt-web", "请总结附件", new AbortController().signal, file)) {
+      events.push(event);
+    }
+
+    expect(events).toEqual([{ type: "done" }]);
+    expect(port.disconnect).toHaveBeenCalledOnce();
   });
 
   it("runs the provider session test through the test port and returns its conversation URL", async () => {
@@ -172,6 +332,42 @@ describe("WebSessionClient", () => {
 
     expect(storage.saveWebSessionCredential).toHaveBeenCalledWith(expect.objectContaining({ accessToken: "new-token" }));
     expect(browserMock.tabs.remove).toHaveBeenCalledWith(77);
+  });
+
+  it("recreates the login tab when the previously found tab disappears", async () => {
+    browserMock.permissions.contains.mockResolvedValue(true);
+    browserMock.tabs.query.mockResolvedValue([
+      { id: 199144277, url: "https://gemini.google.com/app", active: true },
+    ]);
+    browserMock.tabs.update.mockRejectedValueOnce(new Error("No tab with id: 199144277."));
+    browserMock.tabs.create.mockResolvedValue({ id: 199144278, url: "https://gemini.google.com/app", status: "complete" });
+    browserMock.tabs.get.mockResolvedValue({ id: 199144278, url: "https://gemini.google.com/app", status: "complete" });
+    browserMock.tabs.remove.mockResolvedValue(undefined);
+    browserMock.scripting.executeScript.mockResolvedValue([{ result: {
+      status: "ok",
+      credential: { providerId: "gemini-web", authUser: "0", capturedAt: 1 },
+    } }]);
+
+    await new WebSessionClient(makeStorage()).openLogin("gemini-web");
+
+    expect(browserMock.tabs.create).toHaveBeenCalledWith({ url: "https://gemini.google.com/", active: true });
+    expect(browserMock.tabs.remove).toHaveBeenCalledWith(199144278);
+  });
+
+  it("turns a closed login tab into a retryable login error", async () => {
+    browserMock.permissions.contains.mockResolvedValue(true);
+    browserMock.tabs.query.mockResolvedValue([]);
+    browserMock.tabs.create.mockResolvedValue({ id: 199144277, url: "https://gemini.google.com/", status: "loading" });
+    browserMock.tabs.get.mockRejectedValueOnce(new Error("No tab with id: 199144277"));
+    browserMock.tabs.remove.mockResolvedValue(undefined);
+
+    await expect(new WebSessionClient(makeStorage()).openLogin("gemini-web"))
+      .rejects.toMatchObject({
+        code: "auth-required",
+        retryable: true,
+        message: "Gemini Web 登录页已关闭，请重新点击登录并保持页面打开",
+      });
+    expect(browserMock.tabs.remove).toHaveBeenCalledWith(199144277);
   });
 
   it("ignores lookalike provider tabs outside the exact origin", async () => {

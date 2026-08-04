@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
+import { AppError } from "../../src/domain/errors";
 import { isProviderId, isWebSessionProvider, PROVIDER_LABELS } from "../../src/domain/types";
 import { WebSessionProvider } from "../../src/integrations/web-session/provider";
 import { WEB_SESSION_PROVIDER_IDS, getWebSessionSpec } from "../../src/integrations/web-session/specs";
@@ -44,6 +45,61 @@ describe("web session providers", () => {
       { type: "snapshot", text: "session summary" },
       { type: "done", externalUrl: "https://chatgpt.com/c/conversation-1" },
     ]);
+  });
+
+  it("uploads an extracted file when the page text exceeds the web-session limit", async () => {
+    const stream = vi.fn(async function* (_providerId: string, prompt: string, _signal: AbortSignal, file?: File) {
+      yield { type: "snapshot" as const, text: "file summary" };
+      yield { type: "done" as const, externalUrl: "https://chatgpt.com/c/file-summary" };
+      expect(prompt).not.toContain("long-content");
+      expect(file?.name).toBe("article.html");
+    });
+    const client = { validateReady: vi.fn(async () => undefined), stream } as unknown as WebSessionClient;
+    const provider = new WebSessionProvider("chatgpt-web", client);
+    const events = [];
+    for await (const event of provider.summarize({
+      document: {
+        kind: "webpage",
+        title: "Long article",
+        sourceUrl: "https://example.com/long",
+        sourceText: "long-content ".repeat(10_000),
+        uploadFile: new File(["html"], "article.html", { type: "text/html" }),
+        warnings: [],
+      },
+      prompt: "Summarize carefully",
+    }, new AbortController().signal)) events.push(event);
+
+    expect(stream).toHaveBeenCalledOnce();
+    expect(stream.mock.calls[0]?.[3]).toBeInstanceOf(File);
+    expect(events.map((event) => event.type)).toEqual(["warning", "phase", "phase", "snapshot", "done"]);
+    expect(events.find((event) => event.type === "phase" && event.phase === "uploading")).toBeTruthy();
+  });
+
+  it("falls back to truncated text when a long-file upload is rejected", async () => {
+    const stream = vi.fn(async function* (_providerId: string, prompt: string, _signal: AbortSignal, file?: File) {
+      if (file) throw new AppError("upload-failed", "upload unavailable", { retryable: true });
+      expect(prompt).toContain("long-content");
+      yield { type: "snapshot" as const, text: "fallback summary" };
+      yield { type: "done" as const };
+    });
+    const client = { validateReady: vi.fn(async () => undefined), stream } as unknown as WebSessionClient;
+    const provider = new WebSessionProvider("deepseek-web", client);
+    const events = [];
+    for await (const event of provider.summarize({
+      document: {
+        kind: "webpage",
+        title: "Long article",
+        sourceUrl: "https://example.com/long",
+        sourceText: "long-content ".repeat(10_000),
+        uploadFile: new File(["html"], "article.html", { type: "text/html" }),
+        warnings: [],
+      },
+      prompt: "Summarize carefully",
+    }, new AbortController().signal)) events.push(event);
+
+    expect(stream).toHaveBeenCalledTimes(2);
+    expect(events.at(-2)).toMatchObject({ type: "snapshot", text: "fallback summary" });
+    expect(events.at(-1)).toMatchObject({ type: "done" });
   });
 
   it("lets Gemini handle YouTube URLs directly instead of requiring extracted subtitles", async () => {

@@ -71,11 +71,43 @@ button { cursor: pointer; }
 .spinner { width: 14px; height: 14px; border: 2px solid #d1d5db; border-top-color: #2563eb; border-radius: 50%; animation: spin .8s linear infinite; }
 .actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 14px; }
 .web-session-action-group { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; width: 100%; }
+.gemini-diagnostic-box { width: 100%; margin-top: 8px; padding: 12px; border: 1px solid #dbe3f0; border-radius: 8px; background: rgba(255, 255, 255, .45); }
+.gemini-diagnostic-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }
+.gemini-diagnostic-heading h3 { margin: 0 0 4px; font-size: 14px; }
+.gemini-diagnostic-heading p { margin: 0; }
+.gemini-diagnostic-actions { margin-top: 10px; }
+.gemini-diagnostic-report { margin-top: 12px; }
+.gemini-diagnostic-summary { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; font-size: 12px; overflow-wrap: anywhere; }
+.gemini-diagnostic-summary a { color: #2563eb; text-decoration: underline; text-underline-offset: 2px; }
+.gemini-diagnostic-outcome { border-radius: 999px; padding: 2px 7px; font-size: 11px; font-weight: 600; }
+.gemini-diagnostic-outcome.success { color: #166534; background: #dcfce7; }
+.gemini-diagnostic-outcome.warning { color: #92400e; background: #fef3c7; }
+.gemini-diagnostic-outcome.error { color: #991b1b; background: #fee2e2; }
+.gemini-diagnostic-timeline { display: grid; gap: 7px; margin-top: 10px; max-height: 360px; overflow: auto; padding-right: 4px; }
+.gemini-diagnostic-event { display: grid; grid-template-columns: 9px minmax(0, 1fr); gap: 8px; font-size: 12px; line-height: 1.45; }
+.gemini-diagnostic-event-marker { width: 8px; height: 8px; margin-top: 5px; border-radius: 50%; background: #94a3b8; }
+.gemini-diagnostic-event.success .gemini-diagnostic-event-marker { background: #16a34a; }
+.gemini-diagnostic-event.warning .gemini-diagnostic-event-marker { background: #d97706; }
+.gemini-diagnostic-event.error .gemini-diagnostic-event-marker { background: #dc2626; }
+.gemini-diagnostic-event-content { min-width: 0; overflow-wrap: anywhere; }
+.gemini-diagnostic-event-content strong { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11px; }
+.gemini-diagnostic-event-content pre { max-width: 100%; margin: 3px 0 0; padding: 4px 6px; overflow: auto; border-radius: 4px; background: rgba(148, 163, 184, .13); color: inherit; font: 10px/1.4 ui-monospace, SFMono-Regular, Menlo, monospace; white-space: pre-wrap; }
+.gemini-diagnostic-history { margin-top: 10px; font-size: 12px; }
+.gemini-diagnostic-history summary { cursor: pointer; color: #2563eb; }
+.gemini-diagnostic-history > div { display: grid; gap: 4px; margin-top: 6px; }
+.gemini-diagnostic-history-item { display: flex; align-items: center; gap: 7px; width: 100%; border: 0; border-radius: 5px; padding: 5px 6px; background: transparent; color: inherit; text-align: left; font-size: 11px; }
+.gemini-diagnostic-history-item:hover { background: rgba(148, 163, 184, .13); }
+.gemini-diagnostic-history-item > span:nth-child(2) { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .option-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(230px, 1fr)); gap: 12px; }
 .test-page .panel { max-width: 960px; }
 .test-page .subtitle-output { max-height: 65vh; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; margin: 0; padding: 14px; border: 1px solid #d1d5db; border-radius: 8px; background: rgba(255, 255, 255, .55); font: 13px/1.65 ui-monospace, SFMono-Regular, Menlo, monospace; }
 .test-page .tab-url { display: block; margin-top: 4px; color: #6b7280; font-size: 12px; overflow-wrap: anywhere; }
 @media (prefers-color-scheme: dark) { .test-page .subtitle-output { background: rgba(17, 24, 39, .65); border-color: #4b5563; } }
+@media (prefers-color-scheme: dark) {
+  .gemini-diagnostic-box { border-color: #475569; background: rgba(17, 24, 39, .45); }
+  .gemini-diagnostic-summary a { color: #82aaff; }
+  .gemini-diagnostic-history summary { color: #82aaff; }
+}
 
 /* The original side panel is a compact, flat surface rather than a card dashboard. */
 .sidepanel-page { padding: 20px; }

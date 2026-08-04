@@ -7,12 +7,16 @@ import type {
   WebSessionProviderId,
 } from "../../domain/types";
 import { createDefaultSettings, isProviderId } from "../../domain/types";
+import type { GeminiDiagnosticReport } from "../../integrations/web-session/gemini-diagnostics";
+import { isGeminiDiagnosticReport } from "../../integrations/web-session/gemini-diagnostics";
 
 const SETTINGS_KEY = "settings:v2";
 const OPENAI_SECRET_KEY = "secrets:openai-compatible:v1";
 const KIMI_TOKENS_KEY = "local:kimi_tokens";
 const WEB_SESSION_CREDENTIALS_KEY = "local:web_session_credentials:v1";
+const GEMINI_DIAGNOSTICS_KEY = "local:gemini_diagnostics:v1";
 const LEGACY_PROMPT_KEY = "local:custom_prompt";
+const MAX_GEMINI_DIAGNOSTIC_REPORTS = 10;
 
 export interface SettingsRepository {
   getSettings(): Promise<AppSettingsV2>;
@@ -26,6 +30,9 @@ export interface SettingsRepository {
   getWebSessionCredential(providerId: WebSessionProviderId): Promise<WebSessionCredential | null>;
   saveWebSessionCredential(credential: WebSessionCredential): Promise<void>;
   clearWebSessionCredential(providerId: WebSessionProviderId): Promise<void>;
+  getGeminiDiagnosticReports(): Promise<GeminiDiagnosticReport[]>;
+  saveGeminiDiagnosticReport(report: GeminiDiagnosticReport): Promise<void>;
+  clearGeminiDiagnosticReports(): Promise<void>;
 }
 
 function isSettings(value: unknown): value is AppSettingsV2 {
@@ -98,6 +105,29 @@ export function createSettingsRepository(): SettingsRepository {
       const credentials = { ...(stored[WEB_SESSION_CREDENTIALS_KEY] as Record<string, unknown>) };
       delete credentials[providerId];
       await browser.storage.local.set({ [WEB_SESSION_CREDENTIALS_KEY]: credentials });
+    },
+    async getGeminiDiagnosticReports() {
+      const stored = await browser.storage.local.get(GEMINI_DIAGNOSTICS_KEY);
+      if (!Array.isArray(stored[GEMINI_DIAGNOSTICS_KEY])) return [];
+      return (stored[GEMINI_DIAGNOSTICS_KEY] as unknown[])
+        .filter(isGeminiDiagnosticReport)
+        .slice(0, MAX_GEMINI_DIAGNOSTIC_REPORTS);
+    },
+    async saveGeminiDiagnosticReport(report) {
+      const stored = await browser.storage.local.get(GEMINI_DIAGNOSTICS_KEY);
+      const current = Array.isArray(stored[GEMINI_DIAGNOSTICS_KEY])
+        ? (stored[GEMINI_DIAGNOSTICS_KEY] as unknown[]).filter(isGeminiDiagnosticReport)
+        : [];
+      // A conversation URL contains a live session identifier. Keep it only
+      // in the current in-memory report so the recent-history store remains
+      // useful for debugging without retaining session links.
+      const { externalUrl: _externalUrl, ...persistedReport } = report;
+      const next = [persistedReport, ...current.filter((item) => item.runId !== report.runId)]
+        .slice(0, MAX_GEMINI_DIAGNOSTIC_REPORTS);
+      await browser.storage.local.set({ [GEMINI_DIAGNOSTICS_KEY]: next });
+    },
+    async clearGeminiDiagnosticReports() {
+      await browser.storage.local.remove(GEMINI_DIAGNOSTICS_KEY);
     },
   };
 }

@@ -23,6 +23,12 @@ describe("DeepSeek Web RPC", () => {
     expect(body).toMatchObject({ chat_session_id: "session-1", parent_message_id: null, prompt: "PROJECT_OK", thinking_enabled: false });
   });
 
+  it("includes uploaded file ids in the completion request", () => {
+    const request = buildDeepSeekCompletionRequest("请总结附件", "session-1", null, { userToken: "token-1" }, "pow-1", ["file-1"]);
+    const body = JSON.parse(String(request.init.body)) as Record<string, unknown>;
+    expect(body.ref_file_ids).toEqual(["file-1"]);
+  });
+
   it("probes the account endpoint without creating a chat session", async () => {
     const fetchMock = vi.fn(async (_input: RequestInfo | URL, _init?: RequestInit) => new Response(JSON.stringify({
       code: 0,
@@ -71,5 +77,38 @@ describe("DeepSeek Web RPC", () => {
     expect(fetchMock.mock.calls[0]?.[0]).toBe("https://chat.deepseek.com/api/v0/users/current");
     expect((fetchMock.mock.calls[0]?.[1]?.headers as Record<string, string>).Authorization).toBe("Bearer token-1");
     expect((fetchMock.mock.calls[3]?.[1]?.headers as Record<string, string>).Authorization).toBe("Bearer access-token-1");
+  });
+
+  it("uploads and waits for a file before sending its reference", async () => {
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(new Response(JSON.stringify({ code: 0, data: { biz_data: { token: "access-token-1" } } }), { status: 200 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ code: 0, data: { biz_data: { chat_session: { id: "session-1" } } } }), { status: 200 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ code: 0, data: { biz_data: { challenge: {
+        algorithm: "sha256", challenge: "challenge", difficulty: 0, salt: "salt", signature: "signature", expire_at: 123,
+      } } } }), { status: 200 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ code: 0, data: { biz_data: { id: "file-1" } } }), { status: 200 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ code: 0, data: { biz_data: { files: [{ id: "file-1", status: "SUCCESS" }] } } }), { status: 200 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ code: 0, data: { biz_data: { challenge: {
+        algorithm: "sha256", challenge: "challenge", difficulty: 0, salt: "salt", signature: "signature", expire_at: 123,
+      } } } }), { status: 200 }))
+      .mockResolvedValueOnce(new Response([
+        'data: {"v":{"response":{"message_id":9,"fragments":[{"type":"RESPONSE","content":"PROJECT_OK"}]}}}\n\n',
+        "data: [DONE]\n\n",
+      ].join(""), { status: 200 }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(streamDeepSeekWebRpc(
+      "请总结附件",
+      { userToken: "token-file" },
+      new AbortController().signal,
+      () => undefined,
+      { name: "notes.txt", type: "text/plain", size: 5, data: new TextEncoder().encode("hello").buffer as ArrayBuffer },
+    )).resolves.toEqual({ sessionId: "session-1", messageId: 9 });
+
+    expect(fetchMock).toHaveBeenCalledTimes(7);
+    expect(fetchMock.mock.calls[3]?.[0]).toBe("https://chat.deepseek.com/api/v0/file/upload_file");
+    expect(fetchMock.mock.calls[3]?.[1]?.body).toBeInstanceOf(FormData);
+    const completionBody = JSON.parse(String(fetchMock.mock.calls[6]?.[1]?.body)) as Record<string, unknown>;
+    expect(completionBody.ref_file_ids).toEqual(["file-1"]);
   });
 });

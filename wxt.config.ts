@@ -21,6 +21,16 @@ export default defineConfig({
       // permission is needed: the background fetch uses the browser session.
       "https://api.bilibili.com/*",
       "https://*.hdslb.com/*",
+      // Web Session providers: background service worker fetches their pages
+      // and RPC endpoints with credentials:include. These MUST be in fixed
+      // host_permissions so they survive extension reload; optional grants
+      // from ensurePageHostPermission are not persistent.
+      "https://gemini.google.com/*",
+      "https://chatgpt.com/*",
+      "https://chat.deepseek.com/*",
+      // Gemini Web uploads long documents to this separate first-party endpoint
+      // before referencing them from StreamGenerate.
+      "https://content-push.googleapis.com/*",
       // Feedly's entry API is used only as a fallback when the reader DOM has
       // only rendered a summary or a shell around the current article.
       "https://feedly.com/*",

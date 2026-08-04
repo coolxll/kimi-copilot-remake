@@ -1,5 +1,6 @@
 import { AppError } from "../../domain/errors";
 import { sha3_512 } from "js-sha3";
+import type { WebSessionFilePayload } from "./messages";
 
 export interface ChatGptWebRequest {
   url: string;
@@ -17,6 +18,13 @@ export interface ChatGptWebCredential {
   deviceId?: string;
   /** A request-scoped Cookie header; never persist this in WebSessionCredential. */
   cookieHeader?: string;
+}
+
+export interface ChatGptWebFileReference {
+  id: string;
+  mimeType: string;
+  name: string;
+  size: number;
 }
 
 export interface ChatGptConversationRequirements {
@@ -43,6 +51,7 @@ export interface ChatGptWebRequestOptions {
   proofToken?: string;
   arkoseToken?: string;
   websocketRequestId?: string;
+  fileReference?: ChatGptWebFileReference;
 }
 
 /** Build the Web conversation request used by the background protocol client. */
@@ -52,13 +61,24 @@ export function buildChatGptWebRequest(
   options: ChatGptWebRequestOptions = {},
 ): ChatGptWebRequest {
   const parentMessageId = generateRequestId();
+  const metadata = options.fileReference ? {
+    selected_all_github_repos: false,
+    selected_github_repos: [],
+    attachments: [{
+      id: options.fileReference.id,
+      mime_type: options.fileReference.mimeType,
+      name: options.fileReference.name,
+      size: options.fileReference.size,
+    }],
+    system_hints: [],
+  } : {};
   const body = {
     action: "next",
     messages: [{
       id: generateRequestId(),
       author: { role: "user" },
       content: { content_type: "text", parts: [prompt] },
-      metadata: {},
+      metadata,
     }],
     model: options.model || "auto",
     parent_message_id: parentMessageId,
@@ -253,6 +273,74 @@ async function readChatGptJsonResponse(response: Response, label: string, signal
   }
 }
 
+async function uploadChatGptWebFile(
+  file: WebSessionFilePayload,
+  credential: ChatGptWebCredential,
+  signal: AbortSignal,
+): Promise<ChatGptWebFileReference> {
+  try {
+    const headers = {
+      ...buildChatGptAuthHeaders(credential),
+      Accept: "application/json",
+      "Content-Type": "application/json",
+    };
+    const registrationResponse = await fetch("https://chatgpt.com/backend-api/files", {
+      method: "POST",
+      credentials: "include",
+      headers,
+      body: JSON.stringify({
+        file_name: file.name,
+        file_size: file.size,
+        use_case: "multimodal",
+        timezone_offset_min: new Date().getTimezoneOffset(),
+        reset_rate_limits: false,
+      }),
+      signal,
+    });
+    const registration = await readChatGptJsonResponse(registrationResponse, "文件注册", signal);
+    if (!registration || typeof registration !== "object") throw new AppError("upload-failed", "ChatGPT 没有返回文件注册信息", { retryable: true });
+    const registrationRecord = registration as Record<string, unknown>;
+    const fileId = typeof registrationRecord.file_id === "string" ? registrationRecord.file_id : "";
+    const uploadUrl = typeof registrationRecord.upload_url === "string" ? registrationRecord.upload_url : "";
+    if (!fileId || !uploadUrl) throw new AppError("upload-failed", "ChatGPT 文件注册响应缺少上传地址", { retryable: true });
+
+    const blobResponse = await fetch(uploadUrl, {
+      method: "PUT",
+      headers: {
+        "Content-Type": file.type || "application/octet-stream",
+        "x-ms-blob-type": "BlockBlob",
+        "x-ms-version": "2020-04-08",
+      },
+      body: new Uint8Array(file.data),
+      signal,
+    });
+    if (!blobResponse.ok) throw new AppError("upload-failed", `ChatGPT 文件内容上传失败（HTTP ${blobResponse.status}）`, { retryable: true });
+
+    const completeResponse = await fetch(`https://chatgpt.com/backend-api/files/${encodeURIComponent(fileId)}/uploaded`, {
+      method: "POST",
+      credentials: "include",
+      headers,
+      body: "{}",
+      signal,
+    });
+    const completed = await readChatGptJsonResponse(completeResponse, "文件确认", signal);
+    const completeStatus = completed && typeof completed === "object" ? (completed as Record<string, unknown>).status : undefined;
+    if (completeStatus !== "success") throw new AppError("upload-failed", "ChatGPT 文件未确认成功", { retryable: true });
+    return {
+      id: fileId,
+      mimeType: file.type || "application/octet-stream",
+      name: file.name,
+      size: file.size,
+    };
+  } catch (error) {
+    if (signal.aborted) throw signal.reason ?? new DOMException("Aborted", "AbortError");
+    if (error instanceof AppError && (error.code === "auth-required" || error.code === "security-check-required" || error.code === "rate-limit" || error.code === "cancelled" || error.code === "upload-failed")) {
+      throw error;
+    }
+    throw new AppError("upload-failed", `ChatGPT 文件上传失败：${error instanceof Error ? error.message : "未知错误"}`, { cause: error, retryable: true });
+  }
+}
+
 function selectChatGptModel(value: unknown): string {
   const models: unknown[] = value && typeof value === "object" && Array.isArray((value as Record<string, unknown>).models)
     ? (value as Record<string, unknown>).models as unknown[]
@@ -327,6 +415,7 @@ export async function streamChatGptWebRpc(
   credential: ChatGptWebCredential,
   signal: AbortSignal,
   onUpdate: (update: ChatGptStreamUpdate) => void,
+  file?: WebSessionFilePayload,
 ): Promise<{ conversationId?: string }> {
   let registeredSocket: WebSocket | null = null;
   let socketStream: Promise<{ conversationId?: string }> | undefined;
@@ -340,6 +429,7 @@ export async function streamChatGptWebRpc(
       "Openai-Sentinel-Chat-Requirements-Token": context.requirements.token,
       ...(context.proofToken ? { "Openai-Sentinel-Proof-Token": context.proofToken } : {}),
     };
+    const fileReference = file ? await uploadChatGptWebFile(file, credential, signal) : undefined;
     let websocketRequestId: string | undefined;
     if (context.sharedWebsocket) {
       registeredSocket = await openRegisteredSocket(authHeaders, signal, true);
@@ -356,6 +446,7 @@ export async function streamChatGptWebRpc(
       requirementsToken: context.requirements.token,
       proofToken: context.proofToken,
       websocketRequestId,
+      ...(fileReference ? { fileReference } : {}),
     });
     const response = await fetch(request.url, { ...request.init, signal, headers: authHeaders });
     if (response.status === 401 || response.status === 403) {

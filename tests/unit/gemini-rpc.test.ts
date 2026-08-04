@@ -2,9 +2,11 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   buildGeminiWebRequest,
   completeGeminiWebRpc,
+  extractFromHtml,
   extractGeminiWebContext,
   parseGeminiLine,
   parseGeminiProtocolErrorCode,
+  streamGeminiWebRpc,
 } from "../../src/integrations/web-session/gemini-rpc";
 
 function buildGeminiLine(text: string): string {
@@ -58,6 +60,26 @@ describe("Gemini Web RPC", () => {
     expect(extractGeminiWebContext(html).atValue).toBe("stream-at-token");
   });
 
+  it("extracts tokens from single quotes, unquoted keys, or tuple arrays", () => {
+    const singleQuotes = "<script>'SNlM0e':'sq-token'</script>";
+    expect(extractFromHtml("SNlM0e", singleQuotes)).toBe("sq-token");
+
+    const mixedQuotes = '<script>SNlM0e: "mixed-token"</script>';
+    expect(extractFromHtml("SNlM0e", mixedQuotes)).toBe("mixed-token");
+
+    const tupleArray = '<script>["SNlM0e", "tuple-token"]</script>';
+    expect(extractFromHtml("SNlM0e", tupleArray)).toBe("tuple-token");
+
+    const html = `<html lang="zh-CN"><script>'SNlM0e':'at-1', cfb2h: "bl-1", ["FdrFJe", "sid-1"]</script></html>`;
+    expect(extractGeminiWebContext(html)).toEqual({
+      atValue: "at-1",
+      blValue: "bl-1",
+      fSid: "sid-1",
+      locale: "zh-CN",
+      authUser: "0",
+    });
+  });
+
   it("builds the current account-routed StreamGenerate request", () => {
     const request = buildGeminiWebRequest("只回复 PROJECT_OK", {
       atValue: "at-token",
@@ -74,14 +96,13 @@ describe("Gemini Web RPC", () => {
     expect(request.url).toContain("bl=bl-token");
     expect(request.url).toContain("f.sid=sid-token");
     expect(request.url).not.toContain("pageId=none");
-    expect(modelHeader[4]).toBe("56fdd199312815e2");
+    expect(modelHeader[4]).toBe("fbb127bbb056c959");
     expect(modelHeader[8]).toEqual([4, 5, 6, 8]);
     expect(modelHeader[11]).toBe(1);
     expect(modelHeader[14]).toBe(1);
     expect(modelHeader[15]).toBe(1);
     expect(requestPayload).toHaveLength(3);
-    expect(requestPayload[0]).toEqual(["只回复 PROJECT_OK"]);
-    expect(requestPayload[2]).toEqual(["", "", ""]);
+    expect((requestPayload[0] as unknown[])[0]).toBe("只回复 PROJECT_OK");
     expect((request.init.headers as Record<string, string>)["x-goog-ext-525005358-jspb"]).toBeTruthy();
     expect((request.init.headers as Record<string, string>)["x-goog-ext-73010989-jspb"]).toBe("[0]");
     expect((request.init.headers as Record<string, string>)["x-goog-ext-73010990-jspb"]).toBe("[0,0,0]");
@@ -98,6 +119,23 @@ describe("Gemini Web RPC", () => {
     });
     expect(request.url).toContain("https://gemini.google.com/u/2/_/BardChatUi");
     expect((request.init.headers as Record<string, string>)["X-Goog-AuthUser"]).toBe("2");
+  });
+
+  it("places an uploaded file reference in the file-enabled StreamGenerate envelope", () => {
+    const request = buildGeminiWebRequest("请总结附件", {
+      atValue: "at-token",
+      blValue: "bl-token",
+      fSid: "sid-token",
+      locale: "zh-CN",
+      authUser: "0",
+    }, { uploadUrl: "/contrib_service/file-1", name: "notes.txt" });
+    const body = request.init.body as URLSearchParams;
+    const requestPayload = JSON.parse(JSON.parse(body.get("f.req") || "[]")[1]) as unknown[];
+    const message = requestPayload[0] as unknown[];
+
+    expect(requestPayload).toHaveLength(3);
+    expect(message[0]).toBe("请总结附件");
+    expect(message[3]).toEqual([[ ["/contrib_service/file-1"], "notes.txt" ]]);
   });
 
   it("parses the prefixed Gemini RPC response line", () => {
@@ -136,7 +174,7 @@ describe("Gemini Web RPC", () => {
     expect(fetchMock.mock.calls[1][1]).toMatchObject({ credentials: "include", method: "POST" });
   });
 
-  it("refreshes context once after a protocol error", async () => {
+  it("preserves the first protocol error without retrying the accepted request", async () => {
     const fetchMock = vi.fn()
       .mockResolvedValueOnce({
         ok: true,
@@ -162,8 +200,33 @@ describe("Gemini Web RPC", () => {
       });
     vi.stubGlobal("fetch", fetchMock);
 
-    await expect(completeGeminiWebRpc("只回复 PROJECT_OK", new AbortController().signal)).resolves.toBe("PROJECT_OK");
-    expect(fetchMock).toHaveBeenCalledTimes(4);
+    await expect(completeGeminiWebRpc("只回复 PROJECT_OK", new AbortController().signal)).rejects.toMatchObject({
+      code: "api-contract",
+      message: expect.stringContaining("469"),
+    });
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it("keeps a protocol warning when a usable answer follows it", async () => {
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        url: "https://gemini.google.com/app",
+        text: async () => '<html lang="en-US">"SNlM0e":"at-token","cfb2h":"bl-token","FdrFJe":"sid-token"</html>',
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        body: streamFrom(`)]}'${JSON.stringify([["e", 5, null, null, 6757]])}\n${buildGeminiStream("PROJECT_OK")}`),
+      });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(streamGeminiWebRpc("只回复 PROJECT_OK", new AbortController().signal, () => undefined)).resolves.toMatchObject({
+      conversationId: "conversation-1",
+      protocolCodes: [6757],
+    });
+    expect(fetchMock).toHaveBeenCalledTimes(2);
   });
 
   it("keeps the requested account when refreshing context", async () => {
@@ -177,5 +240,42 @@ describe("Gemini Web RPC", () => {
     const { fetchGeminiWebContext } = await import("../../src/integrations/web-session/gemini-rpc");
     await expect(fetchGeminiWebContext(new AbortController().signal, "2")).resolves.toMatchObject({ authUser: "2" });
     expect(fetchMock.mock.calls[0][0]).toBe("https://gemini.google.com/u/2/app");
+  });
+
+  it("uploads a file to Gemini before sending StreamGenerate", async () => {
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        url: "https://gemini.google.com/app",
+        text: async () => '<html lang="en-US">"SNlM0e":"at-token","cfb2h":"bl-token","FdrFJe":"sid-token","qKIAYe":"push-id"</html>',
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        text: async () => "/contrib_service/file-1",
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        body: streamFrom(buildGeminiStream("PROJECT_OK")),
+      });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(streamGeminiWebRpc(
+      "请总结附件",
+      new AbortController().signal,
+      () => undefined,
+      "0",
+      { name: "notes.txt", type: "text/plain", size: 5, data: new TextEncoder().encode("hello").buffer as ArrayBuffer },
+    )).resolves.toEqual({ conversationId: "conversation-1" });
+
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+    expect(fetchMock.mock.calls[1]?.[0]).toBe("https://content-push.googleapis.com/upload");
+    expect((fetchMock.mock.calls[1]?.[1]?.headers as Record<string, string>)["Push-ID"]).toBe("push-id");
+    const streamRequest = fetchMock.mock.calls[2]?.[1];
+    const streamBody = streamRequest?.body as URLSearchParams;
+    const payload = JSON.parse(JSON.parse(streamBody.get("f.req") || "[]")[1]) as unknown[];
+    expect((payload[0] as unknown[])[3]).toEqual([[ ["/contrib_service/file-1"], "notes.txt" ]]);
   });
 });

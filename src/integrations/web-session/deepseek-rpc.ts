@@ -1,9 +1,12 @@
 import { AppError } from "../../domain/errors";
 import { readSseStream } from "../shared/sse";
 import { buildDeepSeekPowResponse, type DeepSeekPowChallenge } from "./deepseek-pow";
+import type { WebSessionFilePayload } from "./messages";
 
 const BASE_URL = "https://chat.deepseek.com";
 const COMPLETION_PATH = "/api/v0/chat/completion";
+const FILE_UPLOAD_PATH = "/api/v0/file/upload_file";
+const FILE_STATUS_PATH = "/api/v0/file/fetch_files";
 
 export interface DeepSeekWebCredential {
   userToken: string;
@@ -22,6 +25,7 @@ export function buildDeepSeekCompletionRequest(
   parentMessageId: number | null,
   credential: DeepSeekWebCredential,
   powResponse: string,
+  refFileIds: readonly string[] = [],
 ): { url: string; init: RequestInit } {
   const headers = createHeaders(credential.accessToken || credential.userToken);
   headers["x-ds-pow-response"] = powResponse;
@@ -35,7 +39,7 @@ export function buildDeepSeekCompletionRequest(
         chat_session_id: sessionId,
         parent_message_id: parentMessageId,
         prompt,
-        ref_file_ids: [],
+        ref_file_ids: [...refFileIds],
         thinking_enabled: false,
         search_enabled: false,
         action: null,
@@ -59,13 +63,15 @@ export async function streamDeepSeekWebRpc(
   credential: DeepSeekWebCredential,
   signal: AbortSignal,
   onUpdate: (update: DeepSeekStreamUpdate) => void,
+  file?: WebSessionFilePayload,
 ): Promise<{ sessionId: string; messageId?: number }> {
   const accessToken = credential.accessToken || await acquireDeepSeekAccessToken(credential, signal);
   const accessCredential = { ...credential, accessToken };
   const sessionId = await createChatSession(accessCredential, signal);
+  const refFileIds = file ? [await uploadDeepSeekWebFile(file, accessCredential, signal)] : [];
   const challenge = await createPowChallenge(accessCredential, signal);
   const powResponse = await buildDeepSeekPowResponse(challenge, COMPLETION_PATH);
-  const request = buildDeepSeekCompletionRequest(prompt, sessionId, null, accessCredential, powResponse);
+  const request = buildDeepSeekCompletionRequest(prompt, sessionId, null, accessCredential, powResponse, refFileIds);
   const response = await fetch(request.url, { ...request.init, signal });
   if (response.status === 401 || response.status === 403) {
     throw new AppError("auth-required", "DeepSeek Web 登录态已失效，请重新登录", { retryable: true });
@@ -136,6 +142,70 @@ export async function streamDeepSeekWebRpc(
   return { sessionId, messageId };
 }
 
+async function uploadDeepSeekWebFile(
+  file: WebSessionFilePayload,
+  credential: DeepSeekWebCredential,
+  signal: AbortSignal,
+): Promise<string> {
+  try {
+    const challenge = await createPowChallenge(credential, signal, FILE_UPLOAD_PATH);
+    const powResponse = await buildDeepSeekPowResponse(challenge, FILE_UPLOAD_PATH);
+    const form = new FormData();
+    form.append("file", new Blob([new Uint8Array(file.data)], { type: file.type || "application/octet-stream" }), file.name);
+    const headers = createHeaders(credential.accessToken || credential.userToken);
+    delete headers["Content-Type"];
+    headers["x-ds-pow-response"] = powResponse;
+    const response = await fetch(`${BASE_URL}${FILE_UPLOAD_PATH}`, {
+      method: "POST",
+      credentials: "include",
+      headers,
+      body: form,
+      signal,
+    });
+    if (response.status === 401 || response.status === 403) {
+      throw new AppError("auth-required", "DeepSeek Web 登录态已失效，请重新登录", { retryable: true });
+    }
+    if (!response.ok) throw new AppError("upload-failed", `DeepSeek 文件上传失败（HTTP ${response.status}）`, { retryable: true });
+    const body = await readJsonResponse(response, "DeepSeek 文件上传");
+    const fileId = unwrapBiz(body).id;
+    if (typeof fileId !== "string" || !fileId) throw new AppError("upload-failed", "DeepSeek 没有返回文件 ID", { retryable: true });
+    await waitForDeepSeekFile(fileId, credential, signal);
+    return fileId;
+  } catch (error) {
+    if (error instanceof AppError && (error.code === "auth-required" || error.code === "rate-limit" || error.code === "cancelled" || error.code === "upload-failed")) {
+      throw error;
+    }
+    throw new AppError("upload-failed", `DeepSeek 文件上传失败：${error instanceof Error ? error.message : "未知错误"}`, { cause: error, retryable: true });
+  }
+}
+
+async function waitForDeepSeekFile(fileId: string, credential: DeepSeekWebCredential, signal: AbortSignal): Promise<void> {
+  const deadline = Date.now() + 30_000;
+  while (Date.now() < deadline) {
+    if (signal.aborted) throw signal.reason ?? new DOMException("Aborted", "AbortError");
+    const response = await fetch(`${BASE_URL}${FILE_STATUS_PATH}?file_ids=${encodeURIComponent(fileId)}`, {
+      method: "GET",
+      credentials: "include",
+      headers: createHeaders(credential.accessToken || credential.userToken),
+      signal,
+    });
+    if (response.status === 401 || response.status === 403) {
+      throw new AppError("auth-required", "DeepSeek Web 登录态已失效，请重新登录", { retryable: true });
+    }
+    if (!response.ok) throw new AppError("upload-failed", `DeepSeek 文件解析状态查询失败（HTTP ${response.status}）`, { retryable: true });
+    const files = unwrapBiz(await readJsonResponse(response, "DeepSeek 文件状态")).files;
+    const fileRecord = Array.isArray(files)
+      ? files.find((item) => item && typeof item === "object" && String((item as Record<string, unknown>).id || "") === fileId)
+        || files[0]
+      : undefined;
+    const status = fileRecord && typeof fileRecord === "object" ? String((fileRecord as Record<string, unknown>).status || "").toUpperCase() : "";
+    if (status === "SUCCESS" || status === "COMPLETED" || status === "PARSED") return;
+    if (status === "FAILED" || status === "ERROR") throw new AppError("upload-failed", "DeepSeek 文件解析失败", { retryable: true });
+    await delayWithSignal(500, signal);
+  }
+  throw new AppError("upload-failed", "DeepSeek 文件解析超时，请稍后重试", { retryable: true });
+}
+
 async function acquireDeepSeekAccessToken(credential: DeepSeekWebCredential, signal: AbortSignal, forceRefresh = false): Promise<string> {
   const cached = forceRefresh ? undefined : deepSeekAccessTokenCache.get(credential.userToken);
   if (cached && cached.expiresAt > Date.now()) return cached.value;
@@ -184,12 +254,16 @@ async function createChatSession(credential: DeepSeekWebCredential, signal: Abor
   return id;
 }
 
-async function createPowChallenge(credential: DeepSeekWebCredential, signal: AbortSignal): Promise<DeepSeekPowChallenge> {
+async function createPowChallenge(
+  credential: DeepSeekWebCredential,
+  signal: AbortSignal,
+  targetPath = COMPLETION_PATH,
+): Promise<DeepSeekPowChallenge> {
   const response = await fetch(`${BASE_URL}/api/v0/chat/create_pow_challenge`, {
     method: "POST",
     credentials: "include",
     headers: createHeaders(credential.accessToken || credential.userToken),
-    body: JSON.stringify({ target_path: COMPLETION_PATH }),
+    body: JSON.stringify({ target_path: targetPath }),
     signal,
   });
   if (response.status === 401 || response.status === 403) {
@@ -210,6 +284,35 @@ async function createPowChallenge(credential: DeepSeekWebCredential, signal: Abo
 }
 
 const deepSeekAccessTokenCache = new Map<string, { value: string; expiresAt: number }>();
+
+async function readJsonResponse(response: Response, label: string): Promise<Record<string, unknown>> {
+  try {
+    const value = await response.json() as unknown;
+    if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("响应不是 JSON 对象");
+    return value as Record<string, unknown>;
+  } catch (error) {
+    throw new AppError("upload-failed", `${label}响应不是有效 JSON`, { cause: error, retryable: true });
+  }
+}
+
+function delayWithSignal(ms: number, signal: AbortSignal): Promise<void> {
+  return new Promise((resolve, reject) => {
+    if (signal.aborted) {
+      reject(signal.reason ?? new DOMException("Aborted", "AbortError"));
+      return;
+    }
+    const timer = setTimeout(() => {
+      signal.removeEventListener("abort", onAbort);
+      resolve();
+    }, ms);
+    const onAbort = () => {
+      clearTimeout(timer);
+      signal.removeEventListener("abort", onAbort);
+      reject(signal.reason ?? new DOMException("Aborted", "AbortError"));
+    };
+    signal.addEventListener("abort", onAbort, { once: true });
+  });
+}
 
 function createHeaders(bearerToken: string): Record<string, string> {
   return {

@@ -24,6 +24,7 @@ export function SidePanelApp() {
   const [repurpose, setRepurpose] = useState<RepurposeState>({ status: "idle" });
   const [repurposeNotice, setRepurposeNotice] = useState<string>();
   const controllerRef = useRef<AbortController | undefined>(undefined);
+  const loginControllerRef = useRef<AbortController | undefined>(undefined);
   const repurposeControllerRef = useRef<AbortController | undefined>(undefined);
   const sourceDocumentRef = useRef<ExtractedDocument | undefined>(undefined);
 
@@ -66,6 +67,9 @@ export function SidePanelApp() {
       disposed = true;
       controllerRef.current?.abort("sidepanel closed");
       repurposeControllerRef.current?.abort("sidepanel closed");
+      // Opening a login tab can unmount this tab-specific side panel. Keep the
+      // login capture alive so the newly opened provider tab is not closed by
+      // the panel cleanup before the user can finish signing in.
       browser.tabs.onUpdated.removeListener(onSourceTabUpdated);
     };
     // The first mount intentionally captures the source tab.
@@ -103,8 +107,9 @@ export function SidePanelApp() {
 
   const handleLogin = async () => {
     controllerRef.current?.abort("login started");
+    loginControllerRef.current?.abort("new login");
     const controller = new AbortController();
-    controllerRef.current = controller;
+    loginControllerRef.current = controller;
     try {
       setLoginNotice(undefined);
       if (isWebSessionProvider(provider)) {
@@ -117,6 +122,8 @@ export function SidePanelApp() {
       if (tabId) await start("kimi-web");
     } catch (error) {
       if (!controller.signal.aborted) dispatch({ type: "error", error: toAppError(error) });
+    } finally {
+      if (loginControllerRef.current === controller) loginControllerRef.current = undefined;
     }
   };
 

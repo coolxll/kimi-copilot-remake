@@ -18,6 +18,8 @@ export interface FeedlyCandidateSnapshot {
   score: number;
   feedlyFrame: boolean;
   entryId?: string;
+  /** The entry is rendered as Feedly's open/detail view, not only as a list card. */
+  detailView?: boolean;
 }
 
 export interface FeedlyListItemSnapshot extends FeedlyCandidateSnapshot {
@@ -72,7 +74,11 @@ export function chooseFeedlyCandidate(
   expectedEntryId?: string,
 ): FeedlyCandidateSnapshot | undefined {
   const candidates = frames
-    .flatMap((frame) => [frame.articleCandidate, frame.listItems?.length ? undefined : frame.candidate])
+    .flatMap((frame) => [
+      frame.articleCandidate,
+      ...(frame.listItems ?? []).filter((item) => item.detailView),
+      frame.listItems?.length ? undefined : frame.candidate,
+    ])
     .filter((candidate): candidate is FeedlyCandidateSnapshot => Boolean(candidate?.feedlyFrame && candidate.text.trim()))
     .sort(compareFeedlyCandidates);
   return (expectedEntryId
@@ -87,7 +93,11 @@ export function chooseFeedlySnapshot(
   expectedEntryId?: string,
 ): FeedlyPageSnapshot | undefined {
   const articleCandidates = frames
-    .flatMap((frame) => [frame.articleCandidate, frame.listItems?.length ? undefined : frame.candidate])
+    .flatMap((frame) => [
+      frame.articleCandidate,
+      ...(frame.listItems ?? []).filter((item) => item.detailView),
+      frame.listItems?.length ? undefined : frame.candidate,
+    ])
     .filter((candidate): candidate is FeedlyCandidateSnapshot => Boolean(candidate?.feedlyFrame && candidate.text.trim()))
     .sort(compareFeedlyCandidates);
   const listFrame = frames
@@ -164,14 +174,12 @@ export class FeedlyExtractor implements ContentExtractor {
     // candidate with another/missing ID is not allowed to turn a list view into
     // an unrelated article; only an exact API fallback may be used then.
     if (pageSnapshot?.articleCandidate && isUsableCandidate(pageSnapshot.articleCandidate)) {
-      if (entryId && !isFeedlyCandidateForEntry(pageSnapshot.articleCandidate, entryId) && pageSnapshot.listItems.length) {
-        return createListDocument(context, pageSnapshot);
-      }
       const apiCandidate = entryId && !isFeedlyCandidateForEntry(pageSnapshot.articleCandidate, entryId)
         ? await fetchFeedlyEntry(entryId, signal).then((entry) => entry ? createApiCandidate(entry, context.url, entryId) : undefined)
         : undefined;
       const candidate = chooseFeedlySource(pageSnapshot.articleCandidate, apiCandidate, entryId);
       if (candidate) return createArticleDocument(context, candidate);
+      if (pageSnapshot.listItems.length) return createListDocument(context, pageSnapshot);
       throw new AppError("extraction-failed", "Feedly 当前正文无法确认对应文章，已拒绝读取不相关内容");
     }
     if (pageSnapshot?.listItems.length) {
@@ -403,6 +411,17 @@ function collectFeedlyFrame(expectedEntryId: string | null): FeedlyFrameSnapshot
     "[data-testid*='reading']",
     "[data-test-id*='reading']",
   ];
+  // Feedly's current detail view does not consistently mark the outer entry as
+  // selected/expanded. These elements are present in the open article header,
+  // and are therefore useful only when paired with a real article body.
+  const detailSelectors = [
+    ".EntryInfo",
+    ".entry-info",
+    ".EntryMetadataWrapper",
+    ".entry-metadata-wrapper",
+    "[data-testid*='entry-info']",
+    "[data-test-id*='entry-info']",
+  ];
   const titleSelectors = [
     ".EntryTitleLink",
     ".entry-title-link",
@@ -454,7 +473,8 @@ function collectFeedlyFrame(expectedEntryId: string | null): FeedlyFrameSnapshot
       }
     }
     const id = element.getAttribute("id") || "";
-    return /entry/i.test(id) ? id.replace(/_main$/i, "") : undefined;
+    if (/_main$/i.test(id) || /entry/i.test(id)) return id.replace(/_main$/i, "");
+    return undefined;
   };
   const getEntryId = (element: Element | null): string | undefined => {
     const ownId = getOwnEntryId(element);
@@ -472,6 +492,11 @@ function collectFeedlyFrame(expectedEntryId: string | null): FeedlyFrameSnapshot
       || element.getAttribute("data-selected") === "true"
       || element.getAttribute("data-expanded") === "true"
       || /entry[-_ ]?(selected|expanded|active|current)|\b(selected|expanded|active|current)\b/.test(identity);
+  };
+  const isDetailEntry = (element: Element): boolean => {
+    if (isSelectedEntry(element)) return true;
+    const hasDetailMarker = detailSelectors.some((selector) => element.matches(selector) || Boolean(element.querySelector(selector)));
+    return hasDetailMarker && Boolean(findVisibleElement(element, strongBodySelectors));
   };
   const contentQuality = (element: Element, root: Element): number => {
     const text = textOf(element);
@@ -512,8 +537,9 @@ function collectFeedlyFrame(expectedEntryId: string | null): FeedlyFrameSnapshot
     if (matchesAny(root, strongBodySelectors) || matchesAny(contentElement, strongBodySelectors)) score += 240;
     if (matchesAny(root, readingSelectors) || matchesAny(contentElement, readingSelectors)) score += 260;
     if (entryRoot) score += 80;
-    if (entryRoot && isSelectedEntry(entryRoot)) score += 320;
-    if (expectedEntryId && getEntryId(entryRoot) === expectedEntryId) score += 100;
+    const detailView = Boolean(entryRoot && isDetailEntry(entryRoot)) || matchesAny(root, readingSelectors);
+    if (detailView) score += 320;
+    if (expectedEntryId && normalizeEntryId(getEntryId(entryRoot)) === normalizeEntryId(expectedEntryId)) score += 100;
     if (/article/.test(identity)) score += 120;
     if (/(toolbar|navigation|sidebar|header|footer|menu|button|action)/.test(identity)) score -= 180;
     return {
@@ -525,6 +551,7 @@ function collectFeedlyFrame(expectedEntryId: string | null): FeedlyFrameSnapshot
       score,
       feedlyFrame,
       entryId: getEntryId(entryRoot || root),
+      detailView,
     };
   };
 
@@ -572,7 +599,7 @@ function collectFeedlyFrame(expectedEntryId: string | null): FeedlyFrameSnapshot
   const addArticleCandidate = (root: Element | null | undefined, scoreBonus = 0): void => {
     if (!root || seenArticleRoots.has(root) || !isVisible(root)) return;
     const entryRoot = root.closest(entrySelector);
-    const openEntry = !entryRoot || isSelectedEntry(entryRoot);
+    const openEntry = !entryRoot || isDetailEntry(entryRoot);
     const directReading = matchesAny(root, readingSelectors);
     const strongBody = matchesAny(root, strongBodySelectors);
     if (!openEntry && !directReading) return;
@@ -583,7 +610,7 @@ function collectFeedlyFrame(expectedEntryId: string | null): FeedlyFrameSnapshot
     articleCandidates.push(candidate);
   };
 
-  entryRoots.filter(isSelectedEntry).forEach((root) => addArticleCandidate(root, 180));
+  entryRoots.filter(isDetailEntry).forEach((root) => addArticleCandidate(root, 180));
   for (const selector of readingSelectors) {
     for (const element of Array.from(document.querySelectorAll(selector)).slice(0, 12)) addArticleCandidate(element, 160);
   }
@@ -600,7 +627,9 @@ function collectFeedlyFrame(expectedEntryId: string | null): FeedlyFrameSnapshot
   }
   articleCandidates.sort((left, right) => {
     if (expectedEntryId) {
-      const expectedPriority = Number(right.entryId === expectedEntryId) - Number(left.entryId === expectedEntryId);
+      const normalizedExpectedId = normalizeEntryId(expectedEntryId);
+      const expectedPriority = Number(normalizeEntryId(right.entryId) === normalizedExpectedId)
+        - Number(normalizeEntryId(left.entryId) === normalizedExpectedId);
       if (expectedPriority) return expectedPriority;
     }
     const quality = (right.score + Math.min(right.text.length, 30_000) / 400)
@@ -614,6 +643,16 @@ function collectFeedlyFrame(expectedEntryId: string | null): FeedlyFrameSnapshot
     articleCandidate: articleCandidates[0],
     listItems,
   };
+
+  function normalizeEntryId(value: string | undefined): string {
+    let normalized = (value || "").trim().replace(/^entry:/i, "").replace(/_main$/i, "");
+    try {
+      normalized = decodeURIComponent(normalized);
+    } catch {
+      // Feedly entry IDs may contain literal percent characters.
+    }
+    return normalized;
+  }
 }
 
 function candidateQuality(candidate: FeedlyCandidateSnapshot): number {
@@ -621,7 +660,13 @@ function candidateQuality(candidate: FeedlyCandidateSnapshot): number {
 }
 
 function normalizeFeedlyEntryId(value: string): string {
-  return value.trim().replace(/^entry:/i, "");
+  let normalized = value.trim().replace(/^entry:/i, "").replace(/_main$/i, "");
+  try {
+    normalized = decodeURIComponent(normalized);
+  } catch {
+    // Feedly entry IDs may contain literal percent characters.
+  }
+  return normalized;
 }
 
 function compareFeedlyListFrames(

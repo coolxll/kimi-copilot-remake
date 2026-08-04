@@ -3,7 +3,7 @@ import tseslint from "typescript-eslint";
 
 export default tseslint.config(
   {
-    ignores: [".output/**", ".wxt/**", "node_modules/**", "public/pdf.worker.mjs"],
+    ignores: [".output/**", ".wxt/**", "node_modules/**", "public/pdf.worker.mjs", "harpa-exploration/**"],
   },
   eslint.configs.recommended,
   ...tseslint.configs.recommended,

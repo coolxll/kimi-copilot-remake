@@ -104,6 +104,11 @@ describe("Feedly article candidate selection", () => {
     expect(chooseFeedlySource(undefined, api, "entry-current")).toBe(api);
   });
 
+  it("normalizes Feedly entry prefixes, encoded IDs, and detail element suffixes", () => {
+    const candidate = frame({ entryId: "entry:G%2FGX%2Fk%3D_demo%3Apart_main" }).candidate!;
+    expect(isFeedlyCandidateForEntry(candidate, "G/GX/k=_demo:part")).toBe(true);
+  });
+
   it("keeps list mode separate from an opened article", () => {
     const list = [
       listItem({ order: 0, entryId: "entry-1", title: "第一篇", text: "第一篇摘要" }),
@@ -129,6 +134,27 @@ describe("Feedly article candidate selection", () => {
       { frameUrl: exact.frameUrl, pageTitle: exact.pageTitle, articleCandidate: exact },
       { frameUrl: unrelated.frameUrl, pageTitle: unrelated.pageTitle, articleCandidate: unrelated },
     ], "entry-current")?.articleCandidate).toBe(exact);
+  });
+
+  it("promotes an expanded detail entry even when Feedly does not mark it selected", () => {
+    const list = [
+      listItem({ order: 0, entryId: "entry-1", title: "列表文章", text: "列表摘要" }),
+      listItem({
+        order: 1,
+        entryId: "entry-open",
+        title: "已打开文章",
+        text: "打开后的完整正文".repeat(40),
+        score: 320,
+        detailView: true,
+      }),
+    ];
+
+    const snapshot = chooseFeedlySnapshot([
+      { frameUrl: "https://feedly.com/i/my/me", pageTitle: "Feedly", listItems: list },
+    ]);
+
+    expect(snapshot?.articleCandidate?.entryId).toBe("entry-open");
+    expect(snapshot?.articleCandidate?.title).toBe("已打开文章");
   });
 
   it("formats every list item in DOM order", () => {
