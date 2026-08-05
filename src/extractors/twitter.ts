@@ -422,11 +422,14 @@ export function parseTweetDetailPayload(value: unknown, seen = new Set<string>()
 export function isLikelyTwitterSpam(tweet: Pick<TwitterTweet, "text" | "bio">, duplicateTexts = new Set<string>()): boolean {
   const text = tweet.text.replace(/\s+/g, " ").trim();
   const normalized = normalizeSpamText(text);
+  const template = normalizeSpamTemplate(text);
   if (!normalized) return true;
   if (duplicateTexts.has(normalized)) return true;
   duplicateTexts.add(normalized);
   if (/^\p{Extended_Pictographic}{1,24}$/u.test(text)) return true;
   if (/(?:airdrop|giveaway|promo(?:tion)?|casino|betting|free crypto|wallet connect|whatsapp|telegram|discord|dm me|message me|check my profile|follow me|follow back|稳赚|空投|返佣|博彩|加微|私信我|互关|回关|主页.*(?:链接|置顶))/i.test(text)) return true;
+  if (/^比.{1,12}好看的?.{0,12}没.{0,6}[骚涩色].{0,12}比.{1,12}[骚涩色]的?.{0,12}没.{0,6}好看/.test(template)) return true;
+  if (/(?:应该没人比我玩[得的]?开了吧|我果然太[骚涩色]了).{0,40}(?:我[福腹]不黑|不信你看|锐评一下我的[福腹])/.test(template)) return true;
   if (/0x[a-f0-9]{20,}|(?:https?:\/\/\S+\s*){2,}/i.test(text)) return true;
   if ((text.match(/https?:\/\//gi) ?? []).length >= 2) return true;
   if ((text.match(/@\w+/g) ?? []).length >= 5 || (text.match(/#\S+/g) ?? []).length >= 7) return true;
@@ -696,6 +699,10 @@ function buildTweetDetailUrl(origin: string, queryId: string, tweetId: string, c
 
 function normalizeSpamText(value: string): string {
   return value.toLowerCase().replace(/https?:\/\/\S+/g, "<url>").replace(/@\w+/g, "<mention>").replace(/\s+/g, " ").trim();
+}
+
+function normalizeSpamTemplate(value: string): string {
+  return value.toLowerCase().replace(/https?:\/\/\S+/g, "").replace(/@\w+/g, "").replace(/[^\p{L}\p{N}]+/gu, "");
 }
 
 function uniqueWarnings(values: readonly string[]): string[] {
