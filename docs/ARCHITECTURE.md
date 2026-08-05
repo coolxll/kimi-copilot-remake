@@ -35,7 +35,9 @@ Registry 按明确顺序尝试提取器，专用站点适配器必须排在普�
 
 Discourse 适配器支持根路径和子路径安装（例如 `/forum/t/...`），使用当前标签页 MAIN world 的 `credentials: include` 请求，不复制或保存 Cookie。短主题读取全部帖子；超过 50 个帖子时读取 Discourse 的原生 summary，再通过 `/t/{id}/posts.json` 补齐选中的帖子，并为热门且有回复的帖子调用 `/posts/{postId}/replies.json` 展开直接回复。最终按 `post_number` 排序，保留 `reply_to_post_number`，并在 200 个帖子 / 160,000 个讨论字符处停止，输出省略 warning。
 
-知乎适配器严格限定 `zhihu.com` 与 `www.zhihu.com` 的问题/回答路径。问题页默认展开前 5 个完整回答，每个回答读取 5 条顶层评论和每条 3 条回复；回答页读取完整回答、20 条顶层评论和每条 3 条回复。评论分页会校验仍属于当前回答，ID 以字符串处理，分页中断时保留已读取内容。
+知乎适配器严格限定 `zhihu.com` 与 `www.zhihu.com` 的问题/回答路径。问题页最多展开 20 个完整回答，每个回答读取 20 条顶层评论和每条 5 条回复；回答页读取完整回答、100 条顶层评论和每条 5 条回复。所有内容共享 120,000 字符预算，优先保留问题和回答正文，再放入顶层评论与回复；正常达到数量或字符预算时静默停止。评论分页会校验仍属于当前回答，ID 以字符串处理，分页异常时保留已读取内容。
+
+X/Twitter 适配器限定官方 `x.com`/`twitter.com` 页面，首页按当前激活的 For you 或 Following 选择 `HomeTimeline`/`HomeLatestTimeline`，最多翻 5 页；帖子页使用 `TweetDetail` 最多翻 5 页。时间线中的帖子最多读取 2 页评论并保留 10 条通过均衡 spam 过滤的评论，单帖最多保留 100 条；时间线和评论共享 120,000 字符预算。Query ID 优先从当前页面加载的 X bundle 解析并保留 opencli fallback，`ct0` 只在 MAIN world 单次请求中使用。
 
 ## Provider 契约
 

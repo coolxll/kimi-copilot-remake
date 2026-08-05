@@ -135,7 +135,7 @@ export function ExtractorTestApp() {
   const selectedTab = tabs.find((tab) => tab.id === selectedTabId);
   return <main className="page test-page"><div className="panel">
     <header className="header">
-      <div><h1>提取器测试</h1><p className="muted">测试 YouTube、Bilibili、Feedly、Discourse、知乎、普通网页和 PDF 的实际提取结果；不读取或保存 Cookie。</p></div>
+      <div><h1>提取器测试</h1><p className="muted">测试 YouTube、Bilibili、Feedly、Discourse、知乎、X / Twitter、普通网页和 PDF 的实际提取结果；不保存站点 Cookie。</p></div>
       <div className="header-actions"><button className="button" onClick={() => void browser.runtime.openOptionsPage()}>返回选项</button></div>
     </header>
 

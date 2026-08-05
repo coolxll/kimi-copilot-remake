@@ -7,6 +7,7 @@ import { PdfExtractor } from "../../src/extractors/pdf";
 import { WebpageExtractor } from "../../src/extractors/webpage";
 import { YoutubeExtractor } from "../../src/extractors/youtube";
 import { ZhihuExtractor } from "../../src/extractors/zhihu";
+import { TwitterExtractor } from "../../src/extractors/twitter";
 
 describe("extractor registry contract", () => {
   it("registers unique site identities with explicit output kinds", () => {
@@ -20,6 +21,7 @@ describe("extractor registry contract", () => {
       { id: "feedly", label: "Feedly", outputKind: "webpage" },
       { id: "discourse", label: "Discourse 论坛", outputKind: "webpage" },
       { id: "zhihu", label: "知乎", outputKind: "webpage" },
+      { id: "twitter", label: "X / Twitter", outputKind: "webpage" },
       { id: "webpage", label: "普通网页", outputKind: "webpage" },
     ]);
   });
@@ -38,9 +40,12 @@ describe("extractor registry contract", () => {
     const extractors = createExtractorRegistry();
 
     expect(await selectExtractor(extractors, { tabId: 1, url: "https://www.zhihu.com/question/123" })).toBeInstanceOf(ZhihuExtractor);
+    expect(await selectExtractor(extractors, { tabId: 1, url: "https://x.com/home" })).toBeInstanceOf(TwitterExtractor);
+    expect(await selectExtractor(extractors, { tabId: 1, url: "https://x.com/alice/status/123" })).toBeInstanceOf(TwitterExtractor);
     expect(await selectExtractor(extractors, { tabId: 1, url: "https://youtube.com.evil.example/watch?v=demo" })).toBeInstanceOf(WebpageExtractor);
     expect(await selectExtractor(extractors, { tabId: 1, url: "https://www.bilibili.com.evil.example/video/BV1Test" })).toBeInstanceOf(WebpageExtractor);
     expect(await selectExtractor(extractors, { tabId: 1, url: "https://example.com/i/my/me?s=entry:G%2Fexample" })).toBeInstanceOf(WebpageExtractor);
+    expect(await selectExtractor(extractors, { tabId: 1, url: "https://x.com.evil.example/home" })).toBeInstanceOf(WebpageExtractor);
   });
 
   it("requires a successful runtime Discourse probe before routing a generic /t/ URL", async () => {

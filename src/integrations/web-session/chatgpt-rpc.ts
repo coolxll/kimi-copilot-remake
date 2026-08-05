@@ -578,7 +578,7 @@ function consumeChatGptLines(
     const parsed = parseChatGptStreamLine(line);
     if (parsed?.conversationId) conversationId = parsed.conversationId;
     if (parsed?.text) {
-      const nextText = mergeChatGptText(latestText, parsed.text);
+      const nextText = parsed.text;
       if (nextText !== latestText) {
         latestText = nextText;
         onUpdate({ text: latestText, conversationId });
@@ -734,7 +734,7 @@ async function readWebSocketStream(
           if (!parsed) continue;
           if (parsed.conversationId) conversationId = parsed.conversationId;
           if (parsed.text) {
-            const nextText = mergeChatGptText(latestText, parsed.text);
+            const nextText = parsed.text;
             if (nextText !== latestText) {
               latestText = nextText;
               onUpdate({ text: latestText, conversationId });
@@ -760,6 +760,10 @@ function extractChatGptText(value: unknown): string {
   if (!value || typeof value !== "object") return "";
   const record = value as Record<string, unknown>;
   const message = record.message && typeof record.message === "object" ? record.message as Record<string, unknown> : record;
+  const author = message.author && typeof message.author === "object"
+    ? message.author as Record<string, unknown>
+    : undefined;
+  if (typeof author?.role === "string" && author.role !== "assistant") return "";
   const content = message.content;
   if (content && typeof content === "object") {
     const contentRecord = content as Record<string, unknown>;
@@ -788,13 +792,6 @@ function extractConversationId(value: unknown): string | undefined {
     if (typeof candidate === "string" && candidate.trim()) return candidate;
   }
   return undefined;
-}
-
-function mergeChatGptText(previous: string, next: string): string {
-  if (!previous) return next;
-  if (next.startsWith(previous)) return next;
-  if (previous.endsWith(next)) return previous;
-  return `${previous}${next}`;
 }
 
 function decodeBase64(value: string): string {

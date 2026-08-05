@@ -268,7 +268,7 @@ export function OptionsApp() {
     {notice && <div className={notice.kind === "success" ? "success" : "error"}>{notice.text}</div>}
     <section className="card">
       <h2>提取器测试</h2>
-      <p className="muted">测试 YouTube、Bilibili、Discourse、知乎、普通网页和 PDF 的实际提取结果，查看正文、讨论、评论和 warning。</p>
+      <p className="muted">测试 YouTube、Bilibili、Discourse、知乎、X / Twitter、普通网页和 PDF 的实际提取结果，查看正文、讨论、评论和 warning。</p>
       <div className="actions"><button className="button" onClick={openExtractorTest}>打开提取器测试页</button></div>
     </section>
     <section className="card">

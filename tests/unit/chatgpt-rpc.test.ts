@@ -86,6 +86,18 @@ describe("ChatGPT Web session RPC", () => {
     expect(parseChatGptStreamLine("data: [DONE]")).toEqual({ done: true, text: "" });
     expect(parseChatGptStreamLine('data: {"message":{"content":{"content_type":"reasoning","parts":["hidden"]}}}'))
       .toMatchObject({ done: false, text: "" });
+    expect(parseChatGptStreamLine('data: {"message":{"author":{"role":"user"},"content":{"parts":["hidden input"]}}}'))
+      .toMatchObject({ done: false, text: "" });
+  });
+
+  it("shows only assistant output when ChatGPT echoes the input message", async () => {
+    const response = new Response(streamFrom([
+      'data: {"conversation_id":"conversation-1","message":{"author":{"role":"user"},"content":{"parts":["请总结这篇文章"]}}}\n',
+      'data: {"conversation_id":"conversation-1","message":{"author":{"role":"assistant"},"content":{"parts":["这是摘要"]}}}\n',
+      "data: [DONE]\n",
+    ].join("")));
+
+    await expect(readChatGptStream(response)).resolves.toBe("这是摘要");
   });
 
   it("keeps the latest full answer from a streamed response", async () => {
@@ -96,6 +108,16 @@ describe("ChatGPT Web session RPC", () => {
     ].join("")));
 
     await expect(readChatGptStream(response)).resolves.toBe("第一段\n第二段");
+  });
+
+  it("replaces revised ChatGPT snapshots instead of concatenating duplicate content", async () => {
+    const response = new Response(streamFrom([
+      'data: {"conversation_id":"conversation-1","message":{"author":{"role":"assistant"},"content":{"parts":["## 摘要\\n旧版本内容"]}}}\n',
+      'data: {"conversation_id":"conversation-1","message":{"author":{"role":"assistant"},"content":{"parts":["## 内容摘要\\n新版本内容"]}}}\n',
+      "data: [DONE]\n",
+    ].join("")));
+
+    await expect(readChatGptStream(response)).resolves.toBe("## 内容摘要\n新版本内容");
   });
 
   it("reads the current shared-websocket body frames", async () => {

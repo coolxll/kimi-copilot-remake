@@ -7,10 +7,12 @@ import { WebpageExtractor } from "./webpage";
 import { fetchPageJson, type PageJsonResult } from "../platform/chrome/page-json";
 
 const ZHIHU_HOSTS = new Set(["zhihu.com", "www.zhihu.com"]);
-const QUESTION_ANSWER_LIMIT = 5;
-const ANSWER_COMMENT_LIMIT = 20;
-const REPLY_LIMIT = 3;
+const QUESTION_ANSWER_LIMIT = 20;
+const QUESTION_COMMENT_LIMIT = 20;
+const ANSWER_COMMENT_LIMIT = 100;
+const REPLY_LIMIT = 5;
 const COMMENT_PAGE_LIMIT = 10;
+const MAX_SOURCE_CHARS = 120_000;
 
 interface ZhihuTarget {
   kind: "question" | "answer";
@@ -45,6 +47,7 @@ interface ZhihuComment {
 interface CommentLimits {
   top: number;
   replies: number;
+  maxChars: number;
 }
 
 export class ZhihuExtractor implements ContentExtractor {
@@ -71,7 +74,10 @@ export class ZhihuExtractor implements ContentExtractor {
         return this.fallback(context, signal, warnings);
       }
       const title = answer.questionTitle || context.title || "知乎回答";
-      const comments = await this.fetchComments(context.tabId, target.origin, answer.id, { top: ANSWER_COMMENT_LIMIT, replies: REPLY_LIMIT }, signal, warnings);
+      const maxChars = remainingCommentChars(context, title, [answer]);
+      const comments = maxChars > 0
+        ? await this.fetchComments(context.tabId, target.origin, answer.id, { top: ANSWER_COMMENT_LIMIT, replies: REPLY_LIMIT, maxChars }, signal, warnings)
+        : [];
       return this.render(context, title, answer ? [answer] : [], new Map([[answer.id, comments]]), warnings);
     }
 
@@ -83,12 +89,21 @@ export class ZhihuExtractor implements ContentExtractor {
       return this.fallback(context, signal, warnings);
     }
     const title = question?.title || answers.find((answer) => answer.questionTitle)?.questionTitle || context.title || "知乎问题";
-    if (!question?.title) warnings.push("问题标题接口不可用，使用页面或回答中的标题");
-    const selectedAnswers = answers.slice(0, QUESTION_ANSWER_LIMIT);
-    if (answers.length > selectedAnswers.length) warnings.push(`问题共有 ${answers.length} 个已读取回答，本次展开前 ${selectedAnswers.length} 个`);
+    const selectedAnswers = fitAnswersToBudget(context, title, answers.slice(0, QUESTION_ANSWER_LIMIT), question?.detail);
     const comments = new Map<string, ZhihuComment[]>();
+    let commentChars = remainingCommentChars(context, title, selectedAnswers, question?.detail);
     for (const answer of selectedAnswers) {
-      comments.set(answer.id, await this.fetchComments(context.tabId, target.origin, answer.id, { top: 5, replies: REPLY_LIMIT }, signal, warnings));
+      if (commentChars <= 0) break;
+      const answerComments = await this.fetchComments(
+        context.tabId,
+        target.origin,
+        answer.id,
+        { top: QUESTION_COMMENT_LIMIT, replies: REPLY_LIMIT, maxChars: commentChars },
+        signal,
+        warnings,
+      );
+      comments.set(answer.id, answerComments);
+      commentChars -= renderComments(answerComments).length;
     }
     return this.render(context, title, selectedAnswers, comments, warnings, question?.detail);
   }
@@ -101,7 +116,7 @@ export class ZhihuExtractor implements ContentExtractor {
 
   private async fetchAnswers(tabId: number, origin: string, questionId: string, signal: AbortSignal, warnings: string[]): Promise<ZhihuAnswer[]> {
     const include = "data[*].content,url,voteup_count,comment_count,author,created_time,updated_time,question";
-    let next = `${origin}/api/v4/questions/${encodeURIComponent(questionId)}/answers?limit=20&offset=0&sort_by=default&include=${encodeURIComponent(include)}`;
+    let next = `${origin}/api/v4/questions/${encodeURIComponent(questionId)}/answers?limit=${QUESTION_ANSWER_LIMIT}&offset=0&sort_by=default&include=${encodeURIComponent(include)}`;
     const answers: ZhihuAnswer[] = [];
     const ids = new Set<string>();
     for (let page = 0; page < COMMENT_PAGE_LIMIT && next; page += 1) {
@@ -125,11 +140,12 @@ export class ZhihuExtractor implements ContentExtractor {
       const validated = validateZhihuAnswersNext(candidate, origin, questionId);
       if (candidate && !validated) warnings.push("知乎回答列表包含不属于当前问题的分页地址，已停止分页");
       next = validated;
-      if (answers.length >= QUESTION_ANSWER_LIMIT) break;
+      if (answers.length >= QUESTION_ANSWER_LIMIT) {
+        next = "";
+        break;
+      }
     }
-    if (next) warnings.push(answers.length >= QUESTION_ANSWER_LIMIT
-      ? "问题回答超过读取上限，后续回答未展开"
-      : "知乎回答列表达到分页安全上限，保留已读取回答");
+    if (next) warnings.push("知乎回答列表达到分页安全上限，保留已读取回答");
     return answers;
   }
 
@@ -149,7 +165,8 @@ export class ZhihuExtractor implements ContentExtractor {
     signal: AbortSignal,
     warnings: string[],
   ): Promise<ZhihuComment[]> {
-    let next = `${origin}/api/v4/answers/${encodeURIComponent(answerId)}/comments?order=normal&limit=20&offset=0&status=open`;
+    const pageSize = Math.min(20, limits.top);
+    let next = `${origin}/api/v4/answers/${encodeURIComponent(answerId)}/comments?order=normal&limit=${pageSize}&offset=0&status=open`;
     const all: ZhihuComment[] = [];
     const ids = new Set<string>();
     for (let page = 0; page < COMMENT_PAGE_LIMIT && next; page += 1) {
@@ -171,24 +188,15 @@ export class ZhihuExtractor implements ContentExtractor {
       const validated = validateZhihuCommentsNext(candidate, origin, answerId);
       if (candidate && !validated) warnings.push(`回答 ${answerId} 的评论分页地址不匹配，已停止分页`);
       next = validated;
+      const selected = selectComments(all, limits);
+      if (selected.filter((comment) => !comment.isReply).length >= limits.top || renderComments(selected).length >= limits.maxChars) {
+        next = "";
+        break;
+      }
     }
     if (next) warnings.push(`回答 ${answerId} 的评论达到分页安全上限，保留已读取内容`);
 
-    const topLevel = all.filter((comment) => !comment.isReply);
-    const selectedTop = topLevel.slice(0, limits.top);
-    const selectedIds = new Set(selectedTop.map((comment) => comment.id));
-    const result: ZhihuComment[] = [...selectedTop];
-    for (const top of selectedTop) {
-      const replies = all.filter((comment) => comment.isReply && (comment.replyToId === top.id || comment.replyToAuthor === top.author));
-      replies.slice(0, limits.replies).forEach((reply) => {
-        if (!selectedIds.has(reply.id)) {
-          selectedIds.add(reply.id);
-          result.push(reply);
-        }
-      });
-    }
-    if (topLevel.length > selectedTop.length) warnings.push(`回答 ${answerId} 的顶层评论超过读取上限`);
-    return result;
+    return fitCommentsToBudget(selectComments(all, limits), limits.maxChars);
   }
 
   private async fetchJson(tabId: number, url: string, signal: AbortSignal): Promise<PageJsonResult> {
@@ -209,20 +217,7 @@ export class ZhihuExtractor implements ContentExtractor {
     warnings: string[],
     questionDetail?: string,
   ): ExtractedDocument {
-    const sections: string[] = [`# ${title}`, `来源：${context.url}`];
-    if (questionDetail?.trim()) sections.push(`## 问题正文\n\n${questionDetail.trim()}`);
-    answers.forEach((answer, index) => {
-      const heading = answers.length === 1 ? "## 回答" : `## 回答 ${index + 1}`;
-      const metadata = [
-        `@${answer.author}`,
-        formatDate(answer.createdAt),
-        typeof answer.likes === "number" ? `${answer.likes} 赞同` : "",
-        typeof answer.commentCount === "number" ? `${answer.commentCount} 评论` : "",
-      ].filter(Boolean).join(" · ");
-      const commentText = renderComments(comments.get(answer.id) ?? []);
-      sections.push(`${heading}${metadata ? ` · ${metadata}` : ""}\n\n${answer.body || "（回答正文为空）"}${commentText}`);
-    });
-    const markdown = appendWarningSection(sections.join("\n\n").trim(), unique(warnings));
+    const markdown = limitZhihuSource(appendWarningSection(renderZhihuContent(context, title, answers, comments, questionDetail), unique(warnings)));
     return {
       kind: "webpage",
       title,
@@ -305,6 +300,120 @@ function normalizeComment(value: unknown, inheritedReplyTo?: ZhihuComment): Zhih
     replyToAuthor: replyAuthor || undefined,
     isReply: Boolean(replyAuthor || replyToId || inheritedReplyTo),
   };
+}
+
+function selectComments(all: readonly ZhihuComment[], limits: Pick<CommentLimits, "top" | "replies">): ZhihuComment[] {
+  const topLevel = all.filter((comment) => !comment.isReply).slice(0, limits.top);
+  const selectedIds = new Set(topLevel.map((comment) => comment.id));
+  const result: ZhihuComment[] = [...topLevel];
+  for (const top of topLevel) {
+    const replies = all.filter((comment) => comment.isReply && (comment.replyToId === top.id || comment.replyToAuthor === top.author));
+    replies.slice(0, limits.replies).forEach((reply) => {
+      if (!selectedIds.has(reply.id)) {
+        selectedIds.add(reply.id);
+        result.push(reply);
+      }
+    });
+  }
+  return result;
+}
+
+function fitCommentsToBudget(comments: readonly ZhihuComment[], maxChars: number): ZhihuComment[] {
+  const selected: ZhihuComment[] = [];
+  for (const comment of comments) {
+    const candidate = [...selected, comment];
+    if (renderComments(candidate).length > maxChars) break;
+    selected.push(comment);
+  }
+  return selected;
+}
+
+function fitAnswersToBudget(
+  context: PageContext,
+  title: string,
+  answers: readonly ZhihuAnswer[],
+  questionDetail?: string,
+): ZhihuAnswer[] {
+  const selected: ZhihuAnswer[] = [];
+  for (const answer of answers) {
+    const candidate = [...selected, answer];
+    const length = renderZhihuContent(context, title, candidate, new Map(), questionDetail).length;
+    if (length > MAX_SOURCE_CHARS) {
+      if (!selected.length) {
+        const fitted = fitFirstAnswerToBudget(context, title, answer, questionDetail);
+        if (fitted) selected.push(fitted);
+      }
+      break;
+    }
+    selected.push(answer);
+  }
+  return selected;
+}
+
+function fitFirstAnswerToBudget(
+  context: PageContext,
+  title: string,
+  answer: ZhihuAnswer,
+  questionDetail?: string,
+): ZhihuAnswer | undefined {
+  const notice = "\n\n（回答正文已按字符预算截断）";
+  let low = 0;
+  let high = answer.body.length;
+  let fitted: ZhihuAnswer | undefined;
+  while (low <= high) {
+    const length = Math.floor((low + high) / 2);
+    const body = length < answer.body.length ? `${answer.body.slice(0, length).trimEnd()}${notice}` : answer.body;
+    const candidate = { ...answer, body };
+    if (renderZhihuContent(context, title, [candidate], new Map(), questionDetail).length <= MAX_SOURCE_CHARS) {
+      fitted = candidate;
+      low = length + 1;
+    } else {
+      high = length - 1;
+    }
+  }
+  return fitted;
+}
+
+function remainingCommentChars(
+  context: PageContext,
+  title: string,
+  answers: readonly ZhihuAnswer[],
+  questionDetail?: string,
+): number {
+  const baseLength = renderZhihuContent(context, title, answers, new Map(), questionDetail).length;
+  return Math.max(0, MAX_SOURCE_CHARS - baseLength);
+}
+
+function renderZhihuContent(
+  context: PageContext,
+  title: string,
+  answers: readonly ZhihuAnswer[],
+  comments: ReadonlyMap<string, readonly ZhihuComment[]>,
+  questionDetail?: string,
+): string {
+  const sections: string[] = [`# ${title}`, `来源：${context.url}`];
+  if (questionDetail?.trim()) sections.push(`## 问题正文\n\n${questionDetail.trim()}`);
+  answers.forEach((answer, index) => {
+    const heading = answers.length === 1 ? "## 回答" : `## 回答 ${index + 1}`;
+    const metadata = [
+      `@${answer.author}`,
+      formatDate(answer.createdAt),
+      typeof answer.likes === "number" ? `${answer.likes} 赞同` : "",
+      typeof answer.commentCount === "number" ? `${answer.commentCount} 评论` : "",
+    ].filter(Boolean).join(" · ");
+    const commentText = renderComments(comments.get(answer.id) ?? []);
+    sections.push(`${heading}${metadata ? ` · ${metadata}` : ""}\n\n${answer.body || "（回答正文为空）"}${commentText}`);
+  });
+  return sections.join("\n\n").trim();
+}
+
+function limitZhihuSource(source: string): string {
+  if (source.length <= MAX_SOURCE_CHARS) return source;
+  const marker = "\n\n[内容已截断]\n\n";
+  const available = MAX_SOURCE_CHARS - marker.length;
+  const headChars = Math.floor(available * 0.8);
+  const tailChars = available - headChars;
+  return `${source.slice(0, headChars).replace(/\s+$/, "")}${marker}${source.slice(-tailChars).replace(/^\s+/, "")}`;
 }
 
 function renderComments(comments: readonly ZhihuComment[]): string {

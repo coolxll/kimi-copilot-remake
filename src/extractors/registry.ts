@@ -8,6 +8,7 @@ import { PdfExtractor } from "./pdf";
 import { WebpageExtractor } from "./webpage";
 import { YoutubeExtractor } from "./youtube";
 import { ZhihuExtractor } from "./zhihu";
+import { TwitterExtractor } from "./twitter";
 
 type ExtractorFactory = () => ContentExtractor;
 
@@ -20,6 +21,7 @@ const EXTRACTOR_FACTORIES: readonly ExtractorFactory[] = [
   () => new FeedlyExtractor(),
   () => new DiscourseExtractor(),
   () => new ZhihuExtractor(),
+  () => new TwitterExtractor(),
   () => new WebpageExtractor(),
 ];
 
