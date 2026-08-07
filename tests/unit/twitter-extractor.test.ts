@@ -38,7 +38,7 @@ function detailPayload(root: Record<string, unknown>, comments: Record<string, u
 }
 
 describe("TwitterExtractor", () => {
-  it("paginates the active For you feed and includes filtered comments", async () => {
+  it("paginates the active For you feed without requesting post comments", async () => {
     const timelineCursors: Array<string | undefined> = [];
     browserMock.scripting.executeScript.mockImplementation(async (details: { args?: unknown[] }) => {
       const args = details.args ?? [];
@@ -60,15 +60,7 @@ describe("TwitterExtractor", () => {
               ]),
         } }];
       }
-      const id = request.url.includes('focalTweetId%22%3A%221%22') || request.url.includes('focalTweetId%22%3A%22') && decodeURIComponent(request.url).includes('"1"') ? "1" : "2";
-      return [{ result: {
-        ok: true,
-        status: 200,
-        data: detailPayload(rawTweet(id, `原帖 ${id}`), [
-          rawTweet(`${id}-good`, "这是具体且有事实依据的正常评论。", "commenter", id),
-          rawTweet(`${id}-spam`, "Join our airdrop on Telegram, DM me", "spammer", id),
-        ]),
-      } }];
+      throw new Error(`unexpected request: ${request.url}`);
     });
 
     const document = await new TwitterExtractor().extract(
@@ -79,14 +71,17 @@ describe("TwitterExtractor", () => {
     expect(document.title).toBe("X For you 推荐时间线");
     expect(document.sourceText).toContain("第一条内容");
     expect(document.sourceText).toContain("第二条内容");
-    expect(document.sourceText).toContain("具体且有事实依据");
-    expect(document.sourceText).not.toContain("Join our airdrop");
+    expect(document.sourceText).not.toContain("评论区");
     expect(document.warnings).toEqual([]);
     expect(timelineCursors).toEqual([undefined, "cursor-2"]);
     expect(browserMock.scripting.executeScript.mock.calls.filter((call) => {
       const args = (call[0] as { args?: unknown[] }).args ?? [];
       return args[0] && typeof args[0] === "object" && String((args[0] as { url?: string }).url).includes("/HomeTimeline");
     })).toHaveLength(2);
+    expect(browserMock.scripting.executeScript.mock.calls.some((call) => {
+      const args = (call[0] as { args?: unknown[] }).args ?? [];
+      return args[0] && typeof args[0] === "object" && String((args[0] as { url?: string }).url).includes("/TweetDetail");
+    })).toBe(false);
   });
 
   it("warns when a later timeline page fails and keeps the first page", async () => {
@@ -120,7 +115,7 @@ describe("TwitterExtractor", () => {
     expect(document.warnings).toContain("X 时间线分页未完整返回，已保留已读取内容");
   });
 
-  it("renders only descendants of a focal reply as comments", async () => {
+  it("renders only the focal post and does not paginate comments", async () => {
     browserMock.scripting.executeScript.mockImplementation(async (details: { args?: unknown[] }) => {
       const args = details.args ?? [];
       if (typeof args[0] === "string") return [{ result: args[1] }];
@@ -142,9 +137,13 @@ describe("TwitterExtractor", () => {
     );
 
     expect(document.sourceText).toContain("当前焦点帖子");
-    expect(document.sourceText).toContain("焦点帖的直接回复内容");
-    expect(document.sourceText).toContain("焦点帖的下级回复内容");
+    expect(document.sourceText).not.toContain("焦点帖的直接回复内容");
+    expect(document.sourceText).not.toContain("焦点帖的下级回复内容");
     expect(document.sourceText).not.toContain("上游对话内容");
     expect(document.sourceText).not.toContain("不相关的注入内容");
+    expect(browserMock.scripting.executeScript.mock.calls.filter((call) => {
+      const args = (call[0] as { args?: unknown[] }).args ?? [];
+      return args[0] && typeof args[0] === "object" && String((args[0] as { url?: string }).url).includes("/TweetDetail");
+    })).toHaveLength(1);
   });
 });

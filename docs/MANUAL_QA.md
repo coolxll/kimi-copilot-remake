@@ -43,7 +43,7 @@
 - [ ] Bilibili 多 P 视频测试 URL `?p=2` 与播放器当前 P；确认字幕 CID 与页面 P 一致。
 - [ ] YouTube 人工字幕、ASR、无字幕各一次；确认人工字幕优先、JSON3/SRV/TTML/SRT/WebVTT 至少两种格式可解析并保留时间戳；无字幕只使用标题/简介并显示“云端转写尚未接入” warning。
 - [ ] 从选项页打开“提取器测试”，扫描并选择已打开的 YouTube、Bilibili、Discourse、知乎、普通网页和 PDF 标签页；确认能直接看到实际提取正文、讨论、评论、时间戳和 warning，也验证输入 URL 新开标签页测试。
-- [ ] X/Twitter 已登录时分别验证 For you、Following 和单帖页面：时间线最多翻 5 页，有回复的帖子最多展开 2 页并显示非 spam 评论；重复、导流、空投和明显广告评论被过滤，API 局部失败保留已有内容并显示聚合 warning。
+- [ ] X/Twitter 已登录时分别验证 For you、Following 和单帖页面：时间线最多翻 5 页且不发起逐帖评论请求；单帖只读取目标帖子，不显示或翻页读取评论；时间线 API 局部失败时保留已有内容并显示 warning。
 - [ ] YouTube 登录/未登录各一次；字幕请求在当前页面上下文完成，扩展不申请或保存 YouTube Cookie；Web 字幕响应为空时确认先复用页面 timedtext 请求/读取 transcript 面板，再确认 Android VR/iOS/TV/VisionOS 备用轨回退生效。
 - [ ] YouTube 页面首次打开侧边栏默认选择 Gemini Web 并自动开始总结；普通网页仍使用选项页中的默认后端，侧边栏手动切换后不被自动改回。
 - [ ] 文本型 PDF 多页提取成功；扫描 PDF 在兼容端显示明确错误，Kimi 尝试上传原文件。

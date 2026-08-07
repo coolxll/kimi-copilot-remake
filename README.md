@@ -49,7 +49,7 @@ YouTube 页面默认使用 Gemini Web：扩展不等待字幕提取，直接把�
 
 Gemini Web 的专用路径参考了 [Gemini Nexus](https://github.com/yeahhe365/Gemini-Nexus) 的逆向协议：每次后台请求先从当前 Google 账号对应的 Gemini `/app` 获取短期 `at/bl/f.sid` 参数，再调用 `StreamGenerate` 并把累计 RPC 文本实时发送到侧栏。参数只在本次请求内存中存在，不写入扩展存储；这不是 Google 官方 API，协议可能随时漂移，失败会显示明确错误，不会回退 DOM 代答。
 
-选项页的“提取器测试”会打开独立诊断页；用户可以扫描已打开的 YouTube、Bilibili、Discourse、知乎、X / Twitter、普通网页和 PDF 标签页，也可以输入 URL 在新标签页中测试，直接查看实际提取到的正文、讨论、评论和 warning。X / Twitter 读取当前激活的 For you/Following 时间线，最多翻 5 页，并为有回复的帖子展开最多 2 页、保留 10 条非 spam 评论；单帖页面最多翻 5 页评论。X 的 `ct0` 只在当前标签页单次请求内使用，不保存到扩展存储。
+选项页的“提取器测试”会打开独立诊断页；用户可以扫描已打开的 YouTube、Bilibili、Discourse、知乎、X / Twitter、普通网页和 PDF 标签页，也可以输入 URL 在新标签页中测试，直接查看实际提取到的正文、讨论、评论和 warning。X / Twitter 读取当前激活的 For you/Following 时间线，最多翻 5 页；单帖页面只读取目标帖子，不读取评论。X 的 `ct0` 只在当前标签页单次请求内使用，不保存到扩展存储。
 
 Discourse 主题会在当前页面会话中读取主题 JSON。短主题完整读取帖子；长主题优先使用 Discourse 原生 `filter=summary` 的热门帖子，再为热门且有回复的帖子展开直接回复，最多 30 个回复线程，并以 200 个帖子 / 160,000 个讨论字符作为安全上限。知乎回答页最多读取 100 条顶层评论及每条 5 条回复；知乎问题页最多读取 20 个完整回答，每个回答最多读取 20 条顶层评论及每条 5 条回复，并以 120,000 个字符作为总内容预算。达到正常数量或字符预算不会显示 warning；接口分页、权限或站点结构变化导致内容不完整时会保留已读取内容并明确 warning。
 

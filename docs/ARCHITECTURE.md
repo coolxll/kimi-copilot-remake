@@ -37,7 +37,7 @@ Discourse 适配器支持根路径和子路径安装（例如 `/forum/t/...`）�
 
 知乎适配器严格限定 `zhihu.com` 与 `www.zhihu.com` 的问题/回答路径。问题页最多展开 20 个完整回答，每个回答读取 20 条顶层评论和每条 5 条回复；回答页读取完整回答、100 条顶层评论和每条 5 条回复。所有内容共享 120,000 字符预算，优先保留问题和回答正文，再放入顶层评论与回复；正常达到数量或字符预算时静默停止。评论分页会校验仍属于当前回答，ID 以字符串处理，分页异常时保留已读取内容。
 
-X/Twitter 适配器限定官方 `x.com`/`twitter.com` 页面，首页按当前激活的 For you 或 Following 选择 `HomeTimeline`/`HomeLatestTimeline`，最多翻 5 页；帖子页使用 `TweetDetail` 最多翻 5 页。时间线中的帖子最多读取 2 页评论并保留 10 条通过均衡 spam 过滤的评论，单帖最多保留 100 条；时间线和评论共享 120,000 字符预算。Query ID 优先从当前页面加载的 X bundle 解析并保留 opencli fallback，`ct0` 只在 MAIN world 单次请求中使用。
+X/Twitter 适配器限定官方 `x.com`/`twitter.com` 页面，首页按当前激活的 For you 或 Following 选择 `HomeTimeline`/`HomeLatestTimeline`，最多翻 5 页；帖子页只发起一次 `TweetDetail` 请求并仅保留目标帖子。适配器不读取或渲染 X 评论，正文使用 120,000 字符预算。Query ID 优先从当前页面加载的 X bundle 解析并保留 opencli fallback，`ct0` 只在 MAIN world 单次请求中使用。
 
 ## Provider 契约
 

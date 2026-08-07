@@ -12,11 +12,7 @@ const HOME_TIMELINE_QUERY_ID = "c-CzHF1LboFilMpsx4ZCrQ";
 const HOME_LATEST_TIMELINE_QUERY_ID = "BKB7oi212Fi7kQtCBGE4zA";
 const TWEET_DETAIL_QUERY_ID = "nBS-WpgA6ZG0CyNHD517JQ";
 const MAX_TIMELINE_PAGES = 5;
-const MAX_COMMENT_PAGES = 2;
-const MAX_STATUS_COMMENT_PAGES = 5;
 const MAX_TIMELINE_TWEETS = 100;
-const MAX_COMMENTS_PER_TWEET = 10;
-const MAX_STATUS_COMMENTS = 100;
 const MAX_SOURCE_CHARS = 120_000;
 
 const TIMELINE_FEATURES = {
@@ -79,7 +75,6 @@ export interface TwitterTweet {
   id: string;
   author: string;
   displayName: string;
-  bio: string;
   text: string;
   likes: number;
   retweets: number;
@@ -89,11 +84,8 @@ export interface TwitterTweet {
   url: string;
   mediaUrls: string[];
   imageUrls: string[];
-  inReplyToId?: string;
   quotedTweet?: Pick<TwitterTweet, "id" | "author" | "displayName" | "text" | "url" | "mediaUrls" | "imageUrls">;
 }
-
-export type TwitterComment = TwitterTweet;
 
 interface TwitterApiResult {
   ok: boolean;
@@ -114,11 +106,6 @@ interface TwitterCursor {
 
 interface TimelineFetchResult {
   tweets: TwitterTweet[];
-  failed: boolean;
-}
-
-interface CommentFetchResult {
-  comments: TwitterComment[];
   failed: boolean;
 }
 
@@ -164,45 +151,27 @@ export class TwitterExtractor implements ContentExtractor {
 
     const title = mode === "following" ? "X Following 时间线" : "X For you 推荐时间线";
     const selectedTweets = fitTweetsToBudget(context, title, timeline.tweets.slice(0, MAX_TIMELINE_TWEETS));
-    const comments = new Map<string, TwitterComment[]>();
-    let commentChars = remainingCommentChars(context, title, selectedTweets);
-    let failedComments = 0;
-    const detailQueryId = await this.resolveQueryId(context.tabId, "TweetDetail", TWEET_DETAIL_QUERY_ID, signal);
-    for (const tweet of selectedTweets) {
-      throwIfAborted(signal);
-      if (commentChars <= 0 || tweet.replies <= 0) continue;
-      const fetched = await this.fetchComments(context.tabId, target.origin, tweet.id, detailQueryId, MAX_COMMENT_PAGES, signal);
-      if (fetched.failed) failedComments += 1;
-      const filtered = fitCommentsToBudget(fetched.comments, Math.max(0, commentChars), MAX_COMMENTS_PER_TWEET, tweet.author);
-      if (filtered.length) {
-        comments.set(tweet.id, filtered);
-        commentChars -= renderComments(filtered).length;
-      }
-    }
-    if (failedComments) warnings.push(`${failedComments} 条 X 帖子的评论接口不可用，已保留其余内容`);
-    return this.render(context, title, selectedTweets, comments, warnings);
+    return this.render(context, title, selectedTweets, warnings);
   }
 
   private async extractStatus(context: PageContext, target: Extract<TwitterTarget, { kind: "status" }>, signal: AbortSignal): Promise<ExtractedDocument> {
     const warnings: string[] = [];
     const queryId = await this.resolveQueryId(context.tabId, "TweetDetail", TWEET_DETAIL_QUERY_ID, signal);
-    let detail: { tweets: TwitterComment[]; failed: boolean };
+    let tweets: TwitterTweet[];
     try {
-      detail = await this.fetchTweetDetail(context.tabId, target.origin, target.tweetId, queryId, MAX_STATUS_COMMENT_PAGES, signal);
+      tweets = await this.fetchStatusTweet(context.tabId, target.origin, target.tweetId, queryId, signal);
     } catch (error) {
       if (signal.aborted) throw error;
       warnings.push("X 帖子接口不可用，已退回当前页面正文");
       return this.fallback(context, signal, warnings);
     }
-    if (!detail.tweets.length) {
+    if (!tweets.length) {
       warnings.push("X 帖子接口未返回可读取内容，已退回当前页面正文");
       return this.fallback(context, signal, warnings);
     }
-    if (detail.failed) warnings.push("X 帖子评论分页未完整返回，已保留已读取内容");
-    const root = detail.tweets.find((tweet) => tweet.id === target.tweetId) ?? detail.tweets[0];
+    const root = tweets.find((tweet) => tweet.id === target.tweetId) ?? tweets[0];
     const title = `@${root.author} 的 X 帖子`;
-    const comments = fitCommentsToBudget(selectTweetDescendants(detail.tweets, root.id), remainingCommentChars(context, title, [root]), MAX_STATUS_COMMENTS, root.author);
-    return this.render(context, title, [root], new Map([[root.id, comments]]), warnings);
+    return this.render(context, title, [root], warnings);
   }
 
   private async fetchTimeline(tabId: number, origin: string, mode: TwitterTimelineMode, queryId: string, signal: AbortSignal): Promise<TimelineFetchResult> {
@@ -227,36 +196,12 @@ export class TwitterExtractor implements ContentExtractor {
     return { tweets, failed };
   }
 
-  private async fetchComments(tabId: number, origin: string, tweetId: string, queryId: string, maxPages: number, signal: AbortSignal): Promise<CommentFetchResult> {
-    const result = await this.fetchTweetDetail(tabId, origin, tweetId, queryId, maxPages, signal);
-    const comments = selectTweetDescendants(result.tweets, tweetId);
-    return { comments, failed: result.failed };
-  }
-
-  private async fetchTweetDetail(tabId: number, origin: string, tweetId: string, queryId: string, maxPages: number, signal: AbortSignal): Promise<{ tweets: TwitterComment[]; failed: boolean }> {
-    const tweets: TwitterComment[] = [];
-    const seen = new Set<string>();
-    const cursors: Array<string | undefined> = [undefined];
-    const seenCursors = new Set<string>();
-    let failed = false;
-    for (let page = 0; page < maxPages && cursors.length; page += 1) {
-      const cursor = cursors.shift();
-      const url = buildTweetDetailUrl(origin, queryId, tweetId, cursor);
-      const result = await this.fetchApi(tabId, url, "GET", signal);
-      if (!result.ok || !result.data) {
-        failed = true;
-        break;
-      }
-      const parsed = parseTweetDetailPayload(result.data, seen);
-      tweets.push(...parsed.tweets);
-      for (const next of parsed.cursors) {
-        if (next.type !== "Top" && !seenCursors.has(next.value) && next.value !== cursor) {
-          seenCursors.add(next.value);
-          cursors.push(next.value);
-        }
-      }
+  private async fetchStatusTweet(tabId: number, origin: string, tweetId: string, queryId: string, signal: AbortSignal): Promise<TwitterTweet[]> {
+    const result = await this.fetchApi(tabId, buildTweetDetailUrl(origin, queryId, tweetId), "GET", signal);
+    if (!result.ok || !result.data) {
+      throw new AppError("api-unavailable", `X 帖子请求失败（HTTP ${result.status || "未知"}）`, { retryable: true });
     }
-    return { tweets, failed };
+    return parseTweetDetailPayload(result.data).tweets;
   }
 
   private async detectTimelineMode(tabId: number, signal: AbortSignal): Promise<TwitterTimelineMode> {
@@ -354,8 +299,8 @@ export class TwitterExtractor implements ContentExtractor {
     return result[0]?.result ?? { ok: false, status: 0, data: null, error: "页面脚本没有返回结果" };
   }
 
-  private render(context: PageContext, title: string, tweets: readonly TwitterTweet[], comments: ReadonlyMap<string, readonly TwitterComment[]>, warnings: readonly string[]): ExtractedDocument {
-    const markdown = appendWarningSection(renderTwitterContent(context, title, tweets, comments), uniqueWarnings(warnings));
+  private render(context: PageContext, title: string, tweets: readonly TwitterTweet[], warnings: readonly string[]): ExtractedDocument {
+    const markdown = appendWarningSection(renderTwitterContent(context, title, tweets), uniqueWarnings(warnings));
     const imageUrls = uniqueImageUrls(tweets.flatMap((tweet) => [
       ...tweet.imageUrls,
       ...(tweet.quotedTweet?.imageUrls ?? []),
@@ -419,33 +364,12 @@ export function parseTweetDetailPayload(value: unknown, seen = new Set<string>()
   return { tweets, cursors: uniqueCursors(cursors) };
 }
 
-export function isLikelyTwitterSpam(tweet: Pick<TwitterTweet, "text" | "bio">, duplicateTexts = new Set<string>()): boolean {
-  const text = tweet.text.replace(/\s+/g, " ").trim();
-  const normalized = normalizeSpamText(text);
-  const template = normalizeSpamTemplate(text);
-  if (!normalized) return true;
-  if (duplicateTexts.has(normalized)) return true;
-  duplicateTexts.add(normalized);
-  if (/^\p{Extended_Pictographic}{1,24}$/u.test(text)) return true;
-  if (/(?:airdrop|giveaway|promo(?:tion)?|casino|betting|free crypto|wallet connect|whatsapp|telegram|discord|dm me|message me|check my profile|follow me|follow back|稳赚|空投|返佣|博彩|加微|私信我|互关|回关|主页.*(?:链接|置顶))/i.test(text)) return true;
-  if (/^比.{1,12}好看的?.{0,12}没.{0,6}[骚涩色].{0,12}比.{1,12}[骚涩色]的?.{0,12}没.{0,6}好看/.test(template)) return true;
-  if (/(?:应该没人比我玩[得的]?开了吧|我果然太[骚涩色]了).{0,40}(?:我[福腹]不黑|不信你看|锐评一下我的[福腹])/.test(template)) return true;
-  if (/0x[a-f0-9]{20,}|(?:https?:\/\/\S+\s*){2,}/i.test(text)) return true;
-  if ((text.match(/https?:\/\//gi) ?? []).length >= 2) return true;
-  if ((text.match(/@\w+/g) ?? []).length >= 5 || (text.match(/#\S+/g) ?? []).length >= 7) return true;
-  if (text.length < 28 && /^(?:wow|nice|great|awesome|gm|good morning|follow|like|agree|支持|好棒|厉害|顶|绝了)[!.。！～~\s]*$/i.test(text)) return true;
-  if (/spam|bot|promo/i.test(tweet.bio) && text.length < 120) return true;
-  return false;
-}
-
 export const __test__ = {
   buildTimelineUrl,
   buildTweetDetailUrl,
   getTimelineInstructions,
-  isLikelyTwitterSpam,
   parseTimelinePayload,
   parseTweetDetailPayload,
-  selectTweetDescendants,
 };
 
 function getTimelineInstructions(value: unknown): Array<{ entries?: unknown[] }> {
@@ -529,7 +453,6 @@ function normalizeTwitterTweet(value: unknown, seen: Set<string>): TwitterTweet 
     id,
     author: screenName,
     displayName,
-    bio: stringValue(userLegacy.description),
     text,
     likes: numberValue(legacy.favorite_count),
     retweets: numberValue(legacy.retweet_count),
@@ -539,7 +462,6 @@ function normalizeTwitterTweet(value: unknown, seen: Set<string>): TwitterTweet 
     url: `https://x.com/${screenName}/status/${id}`,
     mediaUrls: media.urls,
     imageUrls: media.imageUrls,
-    inReplyToId: stringValue(legacy.in_reply_to_status_id_str) || undefined,
     ...(quoted ? { quotedTweet: quoted } : {}),
   };
 }
@@ -602,48 +524,17 @@ function extractMedia(legacy: Record<string, unknown>): { urls: string[]; imageU
   return { urls: uniqueStrings(urls), imageUrls: uniqueStrings(imageUrls) };
 }
 
-function selectTweetDescendants(tweets: readonly TwitterTweet[], rootId: string): TwitterComment[] {
-  const descendantIds = new Set([rootId]);
-  let changed = true;
-  while (changed) {
-    changed = false;
-    for (const tweet of tweets) {
-      if (!descendantIds.has(tweet.id) && tweet.inReplyToId && descendantIds.has(tweet.inReplyToId)) {
-        descendantIds.add(tweet.id);
-        changed = true;
-      }
-    }
-  }
-  return tweets.filter((tweet) => tweet.id !== rootId && descendantIds.has(tweet.id));
-}
-
 function fitTweetsToBudget(context: PageContext, title: string, tweets: readonly TwitterTweet[]): TwitterTweet[] {
   const selected: TwitterTweet[] = [];
   for (const tweet of tweets) {
     const candidate = [...selected, tweet];
-    if (selected.length && renderTwitterContent(context, title, candidate, new Map()).length > MAX_SOURCE_CHARS) break;
+    if (selected.length && renderTwitterContent(context, title, candidate).length > MAX_SOURCE_CHARS) break;
     selected.push(tweet);
   }
   return selected;
 }
 
-function remainingCommentChars(context: PageContext, title: string, tweets: readonly TwitterTweet[]): number {
-  return Math.max(0, MAX_SOURCE_CHARS - renderTwitterContent(context, title, tweets, new Map()).length);
-}
-
-function fitCommentsToBudget(comments: readonly TwitterComment[], maxChars: number, maxCount = MAX_COMMENTS_PER_TWEET, exemptAuthor?: string): TwitterComment[] {
-  const duplicateTexts = new Set<string>();
-  const selected: TwitterComment[] = [];
-  for (const comment of comments) {
-    if (selected.length >= maxCount || (comment.author !== exemptAuthor && isLikelyTwitterSpam(comment, duplicateTexts))) continue;
-    const candidate = [...selected, comment];
-    if (renderComments(candidate).length > maxChars) break;
-    selected.push(comment);
-  }
-  return selected;
-}
-
-function renderTwitterContent(context: PageContext, title: string, tweets: readonly TwitterTweet[], comments: ReadonlyMap<string, readonly TwitterComment[]>): string {
+function renderTwitterContent(context: PageContext, title: string, tweets: readonly TwitterTweet[]): string {
   const sections: string[] = [`# ${title}`, `来源：${context.url}`];
   tweets.forEach((tweet, index) => {
     const metadata = [
@@ -657,18 +548,9 @@ function renderTwitterContent(context: PageContext, title: string, tweets: reado
     ].filter(Boolean).join(" · ");
     const media = tweet.mediaUrls.length ? `\n\n媒体：${tweet.mediaUrls.map((url) => `[${url}](${url})`).join("、")}` : "";
     const quote = tweet.quotedTweet ? `\n\n> 引用 @${tweet.quotedTweet.author}：${tweet.quotedTweet.text}` : "";
-    const commentText = renderComments(comments.get(tweet.id) ?? []);
-    sections.push(`## ${tweets.length === 1 ? "帖子" : `帖子 ${index + 1}`} · ${metadata}\n\n${tweet.text || "（帖子正文为空）"}${quote}${media}\n\n原帖：${tweet.url}${commentText}`);
+    sections.push(`## ${tweets.length === 1 ? "帖子" : `帖子 ${index + 1}`} · ${metadata}\n\n${tweet.text || "（帖子正文为空）"}${quote}${media}\n\n原帖：${tweet.url}`);
   });
   return sections.join("\n\n").trim();
-}
-
-function renderComments(comments: readonly TwitterComment[]): string {
-  if (!comments.length) return "";
-  return `\n\n### 评论区（已读取 ${comments.length} 条，已过滤疑似 spam）\n\n${comments.map((comment, index) => {
-    const metadata = [`@${comment.author}`, formatDate(comment.createdAt), `${comment.likes} 赞同`, `${comment.retweets} 转发`].filter(Boolean).join(" · ");
-    return `#### 评论 ${index + 1} · ${metadata}\n\n${comment.text || "（评论正文为空）"}\n\n原评论：${comment.url}`;
-  }).join("\n\n")}`;
 }
 
 function buildTimelineUrl(origin: string, queryId: string, mode: TwitterTimelineMode, count: number, cursor?: string): string {
@@ -681,7 +563,7 @@ function buildTimelineUrl(origin: string, queryId: string, mode: TwitterTimeline
   return methodless;
 }
 
-function buildTweetDetailUrl(origin: string, queryId: string, tweetId: string, cursor?: string): string {
+function buildTweetDetailUrl(origin: string, queryId: string, tweetId: string): string {
   const variables: Record<string, unknown> = {
     focalTweetId: tweetId,
     referrer: "tweet",
@@ -693,16 +575,7 @@ function buildTweetDetailUrl(origin: string, queryId: string, tweetId: string, c
     withBirdwatchNotes: true,
     withVoice: true,
   };
-  if (cursor) variables.cursor = cursor;
   return `${origin}/i/api/graphql/${queryId}/TweetDetail?variables=${encodeURIComponent(JSON.stringify(variables))}&features=${encodeURIComponent(JSON.stringify(DETAIL_FEATURES))}&fieldToggles=${encodeURIComponent(JSON.stringify(DETAIL_FIELD_TOGGLES))}`;
-}
-
-function normalizeSpamText(value: string): string {
-  return value.toLowerCase().replace(/https?:\/\/\S+/g, "<url>").replace(/@\w+/g, "<mention>").replace(/\s+/g, " ").trim();
-}
-
-function normalizeSpamTemplate(value: string): string {
-  return value.toLowerCase().replace(/https?:\/\/\S+/g, "").replace(/@\w+/g, "").replace(/[^\p{L}\p{N}]+/gu, "");
 }
 
 function uniqueWarnings(values: readonly string[]): string[] {

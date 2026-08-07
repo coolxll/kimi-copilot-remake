@@ -1,6 +1,5 @@
 import { describe, expect, it } from "vitest";
 import {
-  isLikelyTwitterSpam,
   parseTimelinePayload,
   parseTweetDetailPayload,
   parseTwitterTargetUrl,
@@ -53,7 +52,7 @@ describe("Twitter/X extractor", () => {
     expect(result.tweets[0]).toMatchObject({ author: "alice", text: "first", likes: 3, replies: 4 });
   });
 
-  it("parses TweetDetail replies and show-more cursors", () => {
+  it("parses the focal post from a TweetDetail response", () => {
     const result = parseTweetDetailPayload({
       data: {
         threaded_conversation_with_injections_v2: {
@@ -68,7 +67,6 @@ describe("Twitter/X extractor", () => {
       },
     });
     expect(result.tweets.map((value) => value.id)).toEqual(["root", "reply"]);
-    expect(result.cursors).toEqual([{ type: "ShowMore", value: "cursor-replies" }]);
   });
 
   it("keeps video links separate from image thumbnails", () => {
@@ -91,26 +89,4 @@ describe("Twitter/X extractor", () => {
     expect(result.tweets[1].imageUrls).toEqual(["https://pbs.twimg.com/video_thumb.jpg"]);
   });
 
-  it("filters obvious promotional and duplicate spam while preserving concrete comments", () => {
-    const seen = new Set<string>();
-    expect(isLikelyTwitterSpam({ text: "Join our airdrop on Telegram, DM me", bio: "normal" }, seen)).toBe(true);
-    expect(isLikelyTwitterSpam({ text: "这是一个有具体事实和观点的正常回复。", bio: "normal" }, seen)).toBe(false);
-    expect(isLikelyTwitterSpam({ text: "这是一个有具体事实和观点的正常回复。", bio: "normal" }, seen)).toBe(true);
-    expect(isLikelyTwitterSpam({ text: "😀😀😀", bio: "normal" }, new Set())).toBe(true);
-  });
-
-  it("filters repeated sexual-bait templates with emoji and account variations", () => {
-    const templates = [
-      "比她好看的X没她骚Y比她骚的没她好看 @YYkd88",
-      "应该没人比我玩的开了吧😏 我福不黑不信你看",
-      "我果然太涩了🥵有人想锐评一下我的福嘛",
-    ];
-    for (const text of templates) {
-      expect(isLikelyTwitterSpam({ text, bio: "normal" }, new Set()), text).toBe(true);
-    }
-    expect(isLikelyTwitterSpam({
-      text: "这位演员把角色演得很放得开，但对剧情的处理仍然很克制。",
-      bio: "normal",
-    }, new Set())).toBe(false);
-  });
 });
