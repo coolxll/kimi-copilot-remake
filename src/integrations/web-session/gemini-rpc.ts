@@ -504,12 +504,6 @@ async function executeGeminiPageDiagnosticInTab(
     let chunks = 0;
     let lines = 0;
     let parsedCandidates = 0;
-    const mergeText = (previous: string, next: string): string => {
-      if (!previous) return next;
-      if (next.startsWith(previous)) return next;
-      if (previous.endsWith(next)) return previous;
-      return previous + next;
-    };
     const parseLine = (line: string): void => {
       lines += 1;
       try {
@@ -535,7 +529,7 @@ async function executeGeminiPageDiagnosticInTab(
           conversationId = typeof ids[0] === "string" ? ids[0] : conversationId;
           if (!text) continue;
           parsedCandidates += 1;
-          latestText = mergeText(latestText, text);
+          latestText = text;
         }
       } catch {
         // Metadata lines are intentionally ignored by the page control.
@@ -788,7 +782,7 @@ async function readGeminiWebResponseWithUpdates(
     if (parsed) {
       parsedCandidates += 1;
       if (parsed.text) {
-        latestText = mergeGeminiText(latestText, parsed.text);
+        latestText = parsed.text;
         onUpdate({ ...parsed, text: latestText });
       }
       conversationId = parsed.conversationId || conversationId;
@@ -1000,13 +994,6 @@ function summarizeGeminiLine(line: string): unknown {
   } catch {
     return { type: "text", length: line.length };
   }
-}
-
-function mergeGeminiText(previous: string, next: string): string {
-  if (!previous) return next;
-  if (next.startsWith(previous)) return next;
-  if (previous.endsWith(next)) return previous;
-  return `${previous}${next}`;
 }
 
 function stripGeminiConversationPrefix(value: string): string {

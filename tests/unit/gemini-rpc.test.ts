@@ -278,4 +278,36 @@ describe("Gemini Web RPC", () => {
     const payload = JSON.parse(JSON.parse(streamBody.get("f.req") || "[]")[1]) as unknown[];
     expect((payload[0] as unknown[])[3]).toEqual([[ ["/contrib_service/file-1"], "notes.txt" ]]);
   });
+
+  it("updates streamed text with full snapshots without repeating preamble or earlier content", async () => {
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        url: "https://gemini.google.com/app",
+        text: async () => '<html lang="en-US">"SNlM0e":"at-token","cfb2h":"bl-token","FdrFJe":"sid-token"</html>',
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        body: streamFrom(buildGeminiStream(
+          "正在分析视频...",
+          "## 视频核心总结\n1. 第一要点",
+          "## 视频核心总结\n1. 第一要点\n2. 第二要点",
+        )),
+      });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const updates: string[] = [];
+    await streamGeminiWebRpc("请总结视频", new AbortController().signal, (update) => {
+      updates.push(update.text);
+    });
+
+    expect(updates).toEqual([
+      "正在分析视频...",
+      "## 视频核心总结\n1. 第一要点",
+      "## 视频核心总结\n1. 第一要点\n2. 第二要点",
+    ]);
+  });
 });
+
