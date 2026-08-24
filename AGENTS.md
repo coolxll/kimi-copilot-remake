@@ -8,6 +8,7 @@
 - `src/extractors/`: webpage, video, PDF, and discussion-site extraction.
 - `src/integrations/`: Kimi, web-session, and OpenAI-compatible providers.
 - `src/platform/chrome/`: storage, permissions, and browser-specific helpers.
+- `src/shared/`: cross-cutting helpers (logging, abort handling, filename sanitization, image link processing).
 - `src/ui/`: React views, components, and shared styles.
 - `tests/unit/` and `tests/integration/`: Vitest suites; shared fixtures live in `tests/support/`.
 - `public/`: packaged static assets.
