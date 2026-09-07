@@ -31,7 +31,7 @@ corepack pnpm build
 
 也可以执行 `pnpm check` 一次完成 lint、类型检查、单元测试和生产构建。
 
-构建产物位于 `.output/chrome-mv3/`。在 Chrome 中打开 `chrome://extensions`，开启开发者模式，选择“加载已解压的扩展程序”并选择该目录。
+构建产物位于 `dist/chrome-mv3/`。在 Chrome 中打开 `chrome://extensions`，开启开发者模式，选择“加载已解压的扩展程序”并选择该目录。
 
 ## 使用
 

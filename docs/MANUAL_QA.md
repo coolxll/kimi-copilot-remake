@@ -3,7 +3,7 @@
 ## 准备
 
 - [ ] 使用 Chrome 140+ 的干净 profile。
-- [ ] 加载 `.output/chrome-mv3/`，确认没有远程脚本或启动错误。
+- [ ] 加载 `dist/chrome-mv3/`，确认没有远程脚本或启动错误。
 - [ ] 准备 Kimi、ChatGPT、Gemini、DeepSeek 登录态、一个可用的 Chat Completions 服务和一套短/长文本页面。
 - [ ] 测试结束后清除 Kimi 登录态、网页会话凭据、兼容 Token 和已授予的 API origin 权限；扩展存储中不应留下 Cookie、正文或未脱敏 fixture。
 
@@ -66,6 +66,6 @@
 ## 发布前检查
 
 - [ ] `pnpm lint && pnpm typecheck && pnpm test && pnpm build` 全部通过。
-- [ ] `.output/chrome-mv3/` 中无 source map、远程脚本、Token、未脱敏 fixture。
+- [ ] `dist/chrome-mv3/` 中无 source map、远程脚本、Token、未脱敏 fixture。
 - [ ] 重新加载扩展后无未处理 Promise rejection。
 - [ ] 记录 Chrome 版本、扩展版本、测试页面类型和失败项；真实数据不入 Git。
