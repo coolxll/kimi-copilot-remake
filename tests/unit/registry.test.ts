@@ -8,6 +8,9 @@ import { WebpageExtractor } from "../../src/extractors/webpage";
 import { YoutubeExtractor } from "../../src/extractors/youtube";
 import { ZhihuExtractor } from "../../src/extractors/zhihu";
 import { TwitterExtractor } from "../../src/extractors/twitter";
+import { XiaohongshuExtractor } from "../../src/extractors/xiaohongshu";
+import { WechatExtractor } from "../../src/extractors/wechat";
+import { RedditExtractor } from "../../src/extractors/reddit";
 
 describe("extractor registry contract", () => {
   it("registers unique site identities with explicit output kinds", () => {
@@ -22,6 +25,9 @@ describe("extractor registry contract", () => {
       { id: "discourse", label: "Discourse 论坛", outputKind: "webpage" },
       { id: "zhihu", label: "知乎", outputKind: "webpage" },
       { id: "twitter", label: "X / Twitter", outputKind: "webpage" },
+      { id: "xiaohongshu", label: "小红书", outputKind: "webpage" },
+      { id: "wechat", label: "微信公众号", outputKind: "webpage" },
+      { id: "reddit", label: "Reddit", outputKind: "webpage" },
       { id: "webpage", label: "普通网页", outputKind: "webpage" },
     ]);
   });
@@ -33,6 +39,9 @@ describe("extractor registry contract", () => {
     expect(await selectExtractor(extractors, { tabId: 1, url: "https://www.youtube.com/watch?v=demo" })).toBeInstanceOf(YoutubeExtractor);
     expect(await selectExtractor(extractors, { tabId: 1, url: "https://www.bilibili.com/video/BV1Test" })).toBeInstanceOf(BilibiliExtractor);
     expect(await selectExtractor(extractors, { tabId: 1, url: "https://feedly.com/i/my/me?s=entry:G%2Fexample" })).toBeInstanceOf(FeedlyExtractor);
+    expect(await selectExtractor(extractors, { tabId: 1, url: "https://www.xiaohongshu.com/explore/65df2085000000000b031c26" })).toBeInstanceOf(XiaohongshuExtractor);
+    expect(await selectExtractor(extractors, { tabId: 1, url: "https://mp.weixin.qq.com/s/abcdef123456" })).toBeInstanceOf(WechatExtractor);
+    expect(await selectExtractor(extractors, { tabId: 1, url: "https://www.reddit.com/r/technology/comments/1abcde/test_post/" })).toBeInstanceOf(RedditExtractor);
     expect(await selectExtractor(extractors, { tabId: 1, url: "https://example.com/article" })).toBeInstanceOf(WebpageExtractor);
   });
 
@@ -46,6 +55,9 @@ describe("extractor registry contract", () => {
     expect(await selectExtractor(extractors, { tabId: 1, url: "https://www.bilibili.com.evil.example/video/BV1Test" })).toBeInstanceOf(WebpageExtractor);
     expect(await selectExtractor(extractors, { tabId: 1, url: "https://example.com/i/my/me?s=entry:G%2Fexample" })).toBeInstanceOf(WebpageExtractor);
     expect(await selectExtractor(extractors, { tabId: 1, url: "https://x.com.evil.example/home" })).toBeInstanceOf(WebpageExtractor);
+    expect(await selectExtractor(extractors, { tabId: 1, url: "https://xiaohongshu.com.evil.example/explore/123" })).toBeInstanceOf(WebpageExtractor);
+    expect(await selectExtractor(extractors, { tabId: 1, url: "https://mp.weixin.qq.com.evil.example/s/123" })).toBeInstanceOf(WebpageExtractor);
+    expect(await selectExtractor(extractors, { tabId: 1, url: "https://reddit.com.evil.example/r/test/comments/123" })).toBeInstanceOf(WebpageExtractor);
   });
 
   it("requires a successful runtime Discourse probe before routing a generic /t/ URL", async () => {

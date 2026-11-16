@@ -9,6 +9,9 @@ import { WebpageExtractor } from "./webpage";
 import { YoutubeExtractor } from "./youtube";
 import { ZhihuExtractor } from "./zhihu";
 import { TwitterExtractor } from "./twitter";
+import { XiaohongshuExtractor } from "./xiaohongshu";
+import { WechatExtractor } from "./wechat";
+import { RedditExtractor } from "./reddit";
 
 type ExtractorFactory = () => ContentExtractor;
 
@@ -22,6 +25,9 @@ const EXTRACTOR_FACTORIES: readonly ExtractorFactory[] = [
   () => new DiscourseExtractor(),
   () => new ZhihuExtractor(),
   () => new TwitterExtractor(),
+  () => new XiaohongshuExtractor(),
+  () => new WechatExtractor(),
+  () => new RedditExtractor(),
   () => new WebpageExtractor(),
 ];
 

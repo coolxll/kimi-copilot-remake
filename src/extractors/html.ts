@@ -1,6 +1,11 @@
 import TurndownService from "turndown";
 
 export function cleanHtmlForUpload(html: string): string {
+  if (typeof DOMParser === "undefined") {
+    return html
+      .replace(/<(script|style|noscript|template|iframe|object|embed|canvas|form|input|textarea|select|button)\b[^>]*>[\s\S]*?<\/\1>/gi, "")
+      .replace(/<[^>]+\bhidden\b[^>]*>[\s\S]*?<\/[^>]+>/gi, "");
+  }
   const doc = new DOMParser().parseFromString(html, "text/html");
   doc.querySelectorAll("script,style,noscript,template,iframe,object,embed,canvas,form,input,textarea,select,button").forEach((node) => node.remove());
   doc.querySelectorAll("[hidden], [aria-hidden='true']").forEach((node) => node.remove());

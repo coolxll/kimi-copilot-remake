@@ -39,6 +39,12 @@ Discourse 适配器支持根路径和子路径安装（例如 `/forum/t/...`）�
 
 X/Twitter 适配器限定官方 `x.com`/`twitter.com` 页面，首页按当前激活的 For you 或 Following 选择 `HomeTimeline`/`HomeLatestTimeline`，最多翻 5 页；帖子页只发起一次 `TweetDetail` 请求并仅保留目标帖子。适配器不读取或渲染 X 评论，正文使用 120,000 字符预算。Query ID 优先从当前页面加载的 X bundle 解析并保留 opencli fallback，`ct0` 只在 MAIN world 单次请求中使用。
 
+### 图文与社区扩展提取
+
+- **小红书适配器**：匹配 `xiaohongshu.com/explore/...` 与 `/discovery/item/...`。优先在页面 MAIN world 读取客户端状态 `window.__INITIAL_STATE__?.note?.noteDetailMap`，提取完整标题、描述、话题标签、点赞/收藏互动数据，以及无水印原图列表；DOM 作为状态失效时的降级。提取的图片 URL 会进入 `ExtractedDocument.imageUrls`，直接供给图文卡片重塑（Repurpose）工作流。
+- **微信公众号适配器**：匹配 `mp.weixin.qq.com/s/...`。定向提取文章标题、公众号名称、作者与发布时间；重写 `#js_content` 中的懒加载图片属性（`data-src` 提升为 `src`），剔除底部赞赏、推荐卡片和代码块外层行号 DOM，将正文结构化为纯净 Markdown。
+- **Reddit 讨论区适配器**：匹配 `reddit.com/r/*/comments/*`。在页面会话发起同源 `.json` 请求，无缝解析主帖正文与嵌套评论树（过滤 `[deleted]` 评论），复用 `DiscussionItem` 渲染器，并在 60 条评论 / 120,000 字符预算处安全收敛。
+
 ## Provider 契约
 
 ```ts

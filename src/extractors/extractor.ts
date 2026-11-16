@@ -1,6 +1,17 @@
 import type { ExtractedDocument, PageContext } from "../domain/types";
 
-export type ExtractorId = "webpage" | "pdf" | "youtube" | "bilibili" | "feedly" | "discourse" | "zhihu" | "twitter";
+export type ExtractorId =
+  | "webpage"
+  | "pdf"
+  | "youtube"
+  | "bilibili"
+  | "feedly"
+  | "discourse"
+  | "zhihu"
+  | "twitter"
+  | "xiaohongshu"
+  | "wechat"
+  | "reddit";
 
 export interface ExtractorDescriptor {
   readonly id: ExtractorId;
