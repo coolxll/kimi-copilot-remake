@@ -12,6 +12,8 @@
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "test:watch": "vitest",
+    "worker:dev": "wrangler dev worker/src/index.ts",
+    "worker:deploy": "wrangler deploy worker/src/index.ts",
     "check": "eslint . && tsc --noEmit && vitest run && wxt build"
   },
   "dependencies": {
