@@ -1,6 +1,6 @@
 import type { ExtractedDocument, PageContext } from "../domain/types";
 
-export type ExtractorId =
+export type BuiltinExtractorId =
   | "webpage"
   | "pdf"
   | "youtube"
@@ -13,10 +13,14 @@ export type ExtractorId =
   | "wechat"
   | "reddit";
 
+export type ExtractorId = BuiltinExtractorId | (string & {});
+
 export interface ExtractorDescriptor {
   readonly id: ExtractorId;
   readonly label: string;
   readonly outputKind: ExtractedDocument["kind"];
+  readonly priority?: number;
+  readonly enabled?: boolean;
 }
 
 export interface ContentExtractor {

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { createExtractorRegistry, selectExtractor } from "../../src/extractors/registry";
+import { createExtractorRegistry, selectExtractor, ExtractorRegistry } from "../../src/extractors/registry";
 import { BilibiliExtractor } from "../../src/extractors/bilibili";
 import { DiscourseExtractor } from "../../src/extractors/discourse";
 import { FeedlyExtractor } from "../../src/extractors/feedly";
@@ -11,6 +11,7 @@ import { TwitterExtractor } from "../../src/extractors/twitter";
 import { XiaohongshuExtractor } from "../../src/extractors/xiaohongshu";
 import { WechatExtractor } from "../../src/extractors/wechat";
 import { RedditExtractor } from "../../src/extractors/reddit";
+import { DeclarativeExtractor } from "../../src/extractors/declarative";
 
 describe("extractor registry contract", () => {
   it("registers unique site identities with explicit output kinds", () => {
@@ -24,6 +25,9 @@ describe("extractor registry contract", () => {
       { id: "feedly", label: "Feedly", outputKind: "webpage" },
       { id: "discourse", label: "Discourse 论坛", outputKind: "webpage" },
       { id: "zhihu", label: "知乎", outputKind: "webpage" },
+      { id: "zhihu-column", label: "知乎专栏", outputKind: "webpage", priority: 150 },
+      { id: "juejin-article", label: "掘金文章", outputKind: "webpage", priority: 150 },
+      { id: "csdn-blog", label: "CSDN 博客", outputKind: "webpage", priority: 150 },
       { id: "twitter", label: "X / Twitter", outputKind: "webpage" },
       { id: "xiaohongshu", label: "小红书", outputKind: "webpage" },
       { id: "wechat", label: "微信公众号", outputKind: "webpage" },
@@ -42,6 +46,9 @@ describe("extractor registry contract", () => {
     expect(await selectExtractor(extractors, { tabId: 1, url: "https://www.xiaohongshu.com/explore/65df2085000000000b031c26" })).toBeInstanceOf(XiaohongshuExtractor);
     expect(await selectExtractor(extractors, { tabId: 1, url: "https://mp.weixin.qq.com/s/abcdef123456" })).toBeInstanceOf(WechatExtractor);
     expect(await selectExtractor(extractors, { tabId: 1, url: "https://www.reddit.com/r/technology/comments/1abcde/test_post/" })).toBeInstanceOf(RedditExtractor);
+    expect(await selectExtractor(extractors, { tabId: 1, url: "https://zhuanlan.zhihu.com/p/123456" })).toBeInstanceOf(DeclarativeExtractor);
+    expect(await selectExtractor(extractors, { tabId: 1, url: "https://juejin.cn/post/67890" })).toBeInstanceOf(DeclarativeExtractor);
+    expect(await selectExtractor(extractors, { tabId: 1, url: "https://blog.csdn.net/dev/article/details/111" })).toBeInstanceOf(DeclarativeExtractor);
     expect(await selectExtractor(extractors, { tabId: 1, url: "https://example.com/article" })).toBeInstanceOf(WebpageExtractor);
   });
 
@@ -58,6 +65,35 @@ describe("extractor registry contract", () => {
     expect(await selectExtractor(extractors, { tabId: 1, url: "https://xiaohongshu.com.evil.example/explore/123" })).toBeInstanceOf(WebpageExtractor);
     expect(await selectExtractor(extractors, { tabId: 1, url: "https://mp.weixin.qq.com.evil.example/s/123" })).toBeInstanceOf(WebpageExtractor);
     expect(await selectExtractor(extractors, { tabId: 1, url: "https://reddit.com.evil.example/r/test/comments/123" })).toBeInstanceOf(WebpageExtractor);
+  });
+
+  it("supports dynamic registration, priority override, and disable/enable controls", async () => {
+    const registry = new ExtractorRegistry();
+
+    // Disable zhihu
+    registry.disable("zhihu");
+    expect(registry.isEnabled("zhihu")).toBe(false);
+    // When zhihu is disabled, question routes to webpage fallback
+    expect(await registry.select({ tabId: 1, url: "https://www.zhihu.com/question/123" })).toBeInstanceOf(WebpageExtractor);
+
+    // Re-enable zhihu
+    registry.enable("zhihu");
+    expect(registry.isEnabled("zhihu")).toBe(true);
+    expect(await registry.select({ tabId: 1, url: "https://www.zhihu.com/question/123" })).toBeInstanceOf(ZhihuExtractor);
+
+    // Register a dynamic high-priority rule plugin
+    registry.registerRule({
+      id: "custom-site",
+      label: "自定义站点",
+      matchPatterns: ["*://custom.example.com/*"],
+      content: { containerSelector: "#main" },
+      priority: 999,
+    });
+    expect(await registry.select({ tabId: 1, url: "https://custom.example.com/post" })).toBeInstanceOf(DeclarativeExtractor);
+
+    // Unregister custom site
+    registry.unregister("custom-site");
+    expect(await registry.select({ tabId: 1, url: "https://custom.example.com/post" })).toBeInstanceOf(WebpageExtractor);
   });
 
   it("requires a successful runtime Discourse probe before routing a generic /t/ URL", async () => {
