@@ -29,4 +29,12 @@ describe("summary task state", () => {
     state = taskReducer(state, { type: "reset" });
     expect(state).toEqual({ status: "idle" });
   });
+
+  it("deduplicates repeated warning messages", () => {
+    let state = initialTaskState();
+    state = taskReducer(state, { type: "start", provider: "kimi-web" });
+    state = taskReducer(state, { type: "warning", message: "重复的警告" });
+    state = taskReducer(state, { type: "warning", message: "重复的警告" });
+    expect(state).toMatchObject({ status: "loading", warnings: ["重复的警告"] });
+  });
 });

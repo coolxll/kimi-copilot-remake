@@ -36,7 +36,14 @@ export function taskReducer(state: TaskState, action: TaskAction): TaskState {
     case "snapshot":
       return state.status === "loading" ? { ...state, markdown: action.text } : state;
     case "warning":
-      return state.status === "loading" ? { ...state, warnings: [...state.warnings, action.message] } : state;
+      return state.status === "loading"
+        ? {
+            ...state,
+            warnings: state.warnings.includes(action.message)
+              ? state.warnings
+              : [...state.warnings, action.message],
+          }
+        : state;
     case "done":
       return state.status === "loading"
         ? { status: "success", provider: state.provider, markdown: state.markdown, warnings: state.warnings, externalUrl: action.externalUrl }

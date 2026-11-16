@@ -17,7 +17,9 @@ export default defineConfig({
     },
     host_permissions: [
       "https://*.kimi.com/*",
+      "https://*.moonshot.cn/*",
       "https://*.volces.com/*",
+      "https://*.volccdn.com/*",
       // Bilibili metadata/player APIs and the signed subtitle CDN. No cookies
       // permission is needed: the background fetch uses the browser session.
       "https://api.bilibili.com/*",

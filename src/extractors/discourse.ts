@@ -147,6 +147,7 @@ export class DiscourseExtractor implements ContentExtractor {
           || (right.likes ?? 0) - (left.likes ?? 0)
           || left.postNumber - right.postNumber)
         .slice(0, REPLY_EXPANSIONS);
+      let expandedCount = 0;
       for (const candidate of candidates) {
         if (posts.size >= MAX_POSTS) break;
         const result = await this.fetchJson(context.tabId, discourseRepliesUrl(ref, candidate.id), signal, true);
@@ -155,12 +156,17 @@ export class DiscourseExtractor implements ContentExtractor {
           if (!result.ok) warnings.push("部分热门帖子的回复接口不可用，已保留其余讨论");
           continue;
         }
+        let added = false;
         replies.forEach((raw) => {
           const post = normalizePost(raw);
-          if (post && posts.size < MAX_POSTS) posts.set(post.id, post);
+          if (post && posts.size < MAX_POSTS) {
+            posts.set(post.id, post);
+            added = true;
+          }
         });
+        if (added) expandedCount += 1;
       }
-      if (candidates.length) warnings.push(`已为 ${candidates.length} 个热门帖子展开直接回复`);
+      if (expandedCount > 0) warnings.push(`已为 ${expandedCount} 个热门帖子展开直接回复`);
     }
 
     const ordered = [...posts.values()].sort((left, right) => left.postNumber - right.postNumber).slice(0, MAX_POSTS);
@@ -177,18 +183,22 @@ export class DiscourseExtractor implements ContentExtractor {
     warnings: string[],
   ): Promise<void> {
     const missing = ids.filter((id) => !posts.has(id));
+    let unreadableCount = 0;
     for (let offset = 0; offset < missing.length; offset += POST_BATCH_SIZE) {
       const batch = missing.slice(offset, offset + POST_BATCH_SIZE);
       const result = await this.fetchJson(tabId, discoursePostsUrl(ref, batch), signal, true);
       const found = extractPosts(result.data);
       if (!found.length) {
-        warnings.push(`有 ${batch.length} 个帖子无法读取`);
+        unreadableCount += batch.length;
         continue;
       }
       found.forEach((raw) => {
         const post = normalizePost(raw);
         if (post) posts.set(post.id, post);
       });
+    }
+    if (unreadableCount > 0) {
+      warnings.push(`有 ${unreadableCount} 个帖子无法读取`);
     }
   }
 

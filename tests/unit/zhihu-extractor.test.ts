@@ -157,4 +157,109 @@ describe("ZhihuExtractor", () => {
     expect(document.sourceText).not.toContain("-结尾");
     expect(document.sourceText.length).toBeLessThanOrEqual(120_000);
   });
+
+  it("stops comment pagination cleanly when paging.is_end is true even if next url is present", async () => {
+    let commentFetchCount = 0;
+    browserMock.scripting.executeScript.mockImplementation(async (details: { args?: unknown[] }) => {
+      const url = String(details.args?.[0] ?? "");
+      if (url.includes("/api/v4/answers/789?") && !url.includes("/comments")) {
+        return [{ result: { ok: true, status: 200, contentType: "application/json", data: {
+          id: "789",
+          content: "单回答正文",
+          voteup_count: 5,
+          comment_count: 3,
+          author: { name: "答主" },
+          question: { id: "123", title: "测试标题" },
+        } } }];
+      }
+      if (url.includes("/comments")) {
+        commentFetchCount += 1;
+        return [{ result: { ok: true, status: 200, contentType: "application/json", data: {
+          data: [
+            { id: "c1", content: "第一条评论", author: { name: "用户1" }, reply_to_author: null },
+            { id: "c2", content: "第二条评论", author: { name: "用户2" }, reply_to_author: null },
+          ],
+          paging: {
+            is_end: true,
+            next: "https://www.zhihu.com/api/v4/answers/789/comments?limit=20&offset=20",
+          },
+        } } }];
+      }
+      return [{ result: { ok: true, status: 200, contentType: "application/json", data: {} } }];
+    });
+
+    const document = await new ZhihuExtractor().extract(
+      { tabId: 9, url: "https://www.zhihu.com/question/123/answer/789" },
+      new AbortController().signal,
+    );
+
+    expect(commentFetchCount).toBe(1);
+    expect(document.sourceText).toContain("第一条评论");
+    expect(document.sourceText).toContain("第二条评论");
+    expect(document.warnings).toEqual([]);
+  });
+
+  it("skips comment network request when comment_count is 0", async () => {
+    let commentFetchCount = 0;
+    browserMock.scripting.executeScript.mockImplementation(async (details: { args?: unknown[] }) => {
+      const url = String(details.args?.[0] ?? "");
+      if (url.includes("/api/v4/answers/000?") && !url.includes("/comments")) {
+        return [{ result: { ok: true, status: 200, contentType: "application/json", data: {
+          id: "000",
+          content: "零评论回答正文",
+          voteup_count: 10,
+          comment_count: 0,
+          author: { name: "答主" },
+          question: { id: "123", title: "测试标题" },
+        } } }];
+      }
+      if (url.includes("/comments")) {
+        commentFetchCount += 1;
+        return [{ result: { ok: true, status: 200, contentType: "application/json", data: { data: [], paging: { is_end: true } } } }];
+      }
+      return [{ result: { ok: true, status: 200, contentType: "application/json", data: {} } }];
+    });
+
+    const document = await new ZhihuExtractor().extract(
+      { tabId: 9, url: "https://www.zhihu.com/question/123/answer/000" },
+      new AbortController().signal,
+    );
+
+    expect(commentFetchCount).toBe(0);
+    expect(document.sourceText).toContain("零评论回答正文");
+    expect(document.warnings).toEqual([]);
+  });
+
+  it("aggregates comment safety limit warnings in question mode into a single clean notice", async () => {
+    browserMock.scripting.executeScript.mockImplementation(async (details: { args?: unknown[] }) => {
+      const url = String(details.args?.[0] ?? "");
+      if (url.includes("/api/v4/questions/123?") && !url.includes("/answers")) {
+        return [{ result: { ok: true, status: 200, contentType: "application/json", data: { title: "多回答问题" } } }];
+      }
+      if (url.includes("/api/v4/questions/123/answers?")) {
+        return [{ result: { ok: true, status: 200, contentType: "application/json", data: {
+          data: [
+            { id: "ans-1", content: "回答1", author: { name: "答主1" }, comment_count: 100 },
+            { id: "ans-2", content: "回答2", author: { name: "答主2" }, comment_count: 100 },
+          ],
+          paging: { is_end: true },
+        } } }];
+      }
+      if (url.includes("/comments")) {
+        const answerId = url.includes("ans-1") ? "ans-1" : "ans-2";
+        return [{ result: { ok: true, status: 200, contentType: "application/json", data: {
+          data: [{ id: `${answerId}-c`, content: "评论", author: { name: "用户" }, reply_to_author: { name: "某人" } }],
+          paging: { is_end: false, next: `https://www.zhihu.com/api/v4/answers/${answerId}/comments?limit=20&offset=20` },
+        } } }];
+      }
+      return [{ result: { ok: true, status: 200, contentType: "application/json", data: {} } }];
+    });
+
+    const document = await new ZhihuExtractor().extract(
+      { tabId: 9, url: "https://www.zhihu.com/question/123" },
+      new AbortController().signal,
+    );
+
+    expect(document.warnings).toEqual(["部分回答的评论达到分页安全上限，保留已读取内容"]);
+  });
 });

@@ -1,5 +1,6 @@
 import { AppError } from "../../domain/errors";
 import type { KimiTokens } from "../../domain/types";
+import { abortableDelay, throwIfAborted } from "../../shared/abort";
 import { readSseStream } from "../shared/sse";
 
 interface KimiClientOptions {
@@ -41,24 +42,96 @@ export class KimiClient {
   }
 
   async uploadFile(file: File, signal?: AbortSignal): Promise<{ id: string }> {
+    const safeName = file.name.replace(/[\\/:*?"<>|\u0000-\u001f]/g, "_").trim().slice(0, 80) || "document.txt";
+    const formData = new FormData();
+    formData.append("file", file, safeName);
+
+    try {
+      const body = await this.requestJson<{ file?: { id?: string } }>("/apiv2-files/file/upload", {
+        method: "POST",
+        body: formData,
+        signal,
+      });
+      if (body.file?.id) return { id: body.file.id };
+    } catch (error) {
+      if (signal?.aborted) throw error;
+      // Fallback to legacy pre-sign-url flow if apiv2-files is rejected or returns an error
+      return this.uploadFileLegacy(file, safeName, signal);
+    }
+    throw new AppError("api-contract", "Kimi 没有返回上传文件 ID");
+  }
+
+  private async uploadFileLegacy(file: File, safeName: string, signal?: AbortSignal): Promise<{ id: string }> {
     const presign = await this.requestJson<{ url?: string; object_name?: string }>("/api/pre-sign-url", {
       method: "POST",
-      body: JSON.stringify({ action: "file", name: file.name }),
+      body: JSON.stringify({ action: "file", name: safeName }),
       signal,
     });
     if (!presign.url || !presign.object_name) throw new AppError("api-contract", "Kimi 预签名响应不完整");
-    const uploadResponse = await fetch(presign.url, { method: "PUT", body: file, signal });
+    const arrayBuffer = await file.arrayBuffer();
+    const uploadResponse = await fetch(presign.url, {
+      method: "PUT",
+      body: arrayBuffer,
+      signal,
+    });
     if (!uploadResponse.ok) throw new AppError("upload-failed", `文件上传失败（HTTP ${uploadResponse.status}）`, { retryable: true });
     const registered = await this.requestJson<{ id?: string }>("/api/file", {
       method: "POST",
-      body: JSON.stringify({ type: "file", name: file.name, object_name: presign.object_name }),
+      body: JSON.stringify({ type: "file", name: safeName, object_name: presign.object_name }),
       signal,
     });
     if (!registered.id) throw new AppError("api-contract", "Kimi 没有返回文件 ID");
     return { id: registered.id };
   }
 
-  async waitForParse(fileId: string, signal: AbortSignal): Promise<string> {
+  async waitForParse(fileId: string, signal: AbortSignal, maxWaitMs = 60_000): Promise<string> {
+    const startTime = Date.now();
+    let rpcAvailable = true;
+
+    while (Date.now() - startTime < maxWaitMs) {
+      throwIfAborted(signal);
+      if (rpcAvailable) {
+        try {
+          const body = await this.requestJson<{
+            progresses?: Array<{
+              file_id?: string;
+              fileId?: string;
+              status?: string;
+              error?: { message?: string; detail?: string };
+            }>;
+          }>("/apiv2-files/kimi.gateway.file.v1.FileService/GetFileParseProgress", {
+            method: "POST",
+            body: JSON.stringify({ file_ids: [fileId], fileIds: [fileId] }),
+            signal,
+          });
+
+          const progress = body.progresses?.find((p) => (p.file_id || p.fileId) === fileId) ?? body.progresses?.[0];
+          if (progress?.status) {
+            const status = progress.status.toUpperCase();
+            if (status === "SUCCESS" || status === "PARSED") {
+              return "parsed";
+            }
+            if (status === "FAILED") {
+              const detail = progress.error?.message || progress.error?.detail;
+              throw new AppError("parse-failed", `Kimi 文件解析失败${detail ? `（${detail}）` : ""}`);
+            }
+          }
+        } catch (error) {
+          if (error instanceof AppError && error.code === "parse-failed") throw error;
+          rpcAvailable = false;
+        }
+      }
+
+      if (!rpcAvailable) {
+        return this.waitForParseSse(fileId, signal);
+      }
+
+      await abortableDelay(1000, signal);
+    }
+    throw new AppError("parse-failed", "Kimi 文件解析超时");
+  }
+
+  private async waitForParseSse(fileId: string, signal: AbortSignal): Promise<string> {
     const response = await this.requestStream("/api/file/parse_process", {
       method: "POST",
       body: JSON.stringify({ ids: [fileId] }),
@@ -66,8 +139,23 @@ export class KimiClient {
     });
     if (!response.body) throw new AppError("parse-failed", "Kimi 没有返回文件解析流");
     for await (const event of readSseStream(response.body, signal)) {
-      const payload = parseJson(event.data);
-      if (payload?.status && payload.status !== "parsing") return payload.status;
+      if (!event.data || !event.data.trim()) continue;
+      let payload: any;
+      try {
+        payload = JSON.parse(event.data);
+      } catch {
+        continue;
+      }
+      const status = (payload?.status && payload.status !== "parsing")
+        ? payload.status
+        : (payload?.[fileId]?.status ?? payload?.data?.status ?? payload?.file_status);
+      if (status && status !== "parsing") {
+        if (status !== "parsed") {
+          const detail = payload?.detail || payload?.message || payload?.error || payload?.reason || payload?.[fileId]?.error;
+          throw new AppError("parse-failed", `Kimi 文件解析状态：${status}${detail ? `（${detail}）` : ""}`);
+        }
+        return status;
+      }
     }
     throw new AppError("parse-failed", "Kimi 文件解析流提前结束");
   }
@@ -119,12 +207,17 @@ export class KimiClient {
   private async request(path: string, init: RequestInit): Promise<Response> {
     const signal = init.signal;
     await withAbort(this.ensureAccessToken(), signal ?? undefined);
+    const defaultHeaders: Record<string, string> = {
+      Referer: "https://www.kimi.com/",
+      Authorization: `Bearer ${this.accessToken}`,
+    };
+    if (!(init.body instanceof FormData)) {
+      defaultHeaders["Content-Type"] = "application/json";
+    }
     const execute = () => fetch(`https://www.kimi.com${path}`, {
       ...init,
       headers: {
-        Referer: "https://www.kimi.com/",
-        Authorization: `Bearer ${this.accessToken}`,
-        "Content-Type": "application/json",
+        ...defaultHeaders,
         ...init.headers,
       },
     });

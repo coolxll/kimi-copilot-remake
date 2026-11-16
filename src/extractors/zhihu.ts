@@ -75,8 +75,8 @@ export class ZhihuExtractor implements ContentExtractor {
       }
       const title = answer.questionTitle || context.title || "知乎回答";
       const maxChars = remainingCommentChars(context, title, [answer]);
-      const comments = maxChars > 0
-        ? await this.fetchComments(context.tabId, target.origin, answer.id, { top: ANSWER_COMMENT_LIMIT, replies: REPLY_LIMIT, maxChars }, signal, warnings)
+      const comments = (answer.commentCount ?? 1) > 0 && maxChars > 0
+        ? await this.fetchComments(context.tabId, target.origin, answer.id, { top: ANSWER_COMMENT_LIMIT, replies: REPLY_LIMIT, maxChars }, signal, warnings, false)
         : [];
       return this.render(context, title, answer ? [answer] : [], new Map([[answer.id, comments]]), warnings);
     }
@@ -94,6 +94,7 @@ export class ZhihuExtractor implements ContentExtractor {
     let commentChars = remainingCommentChars(context, title, selectedAnswers, question?.detail);
     for (const answer of selectedAnswers) {
       if (commentChars <= 0) break;
+      if (answer.commentCount === 0) continue;
       const answerComments = await this.fetchComments(
         context.tabId,
         target.origin,
@@ -101,6 +102,7 @@ export class ZhihuExtractor implements ContentExtractor {
         { top: QUESTION_COMMENT_LIMIT, replies: REPLY_LIMIT, maxChars: commentChars },
         signal,
         warnings,
+        true,
       );
       comments.set(answer.id, answerComments);
       commentChars -= renderComments(answerComments).length;
@@ -124,9 +126,14 @@ export class ZhihuExtractor implements ContentExtractor {
       if (!result.ok || !isRecord(result.data)) {
         if (!answers.length) warnings.push("知乎回答列表请求失败");
         else warnings.push("知乎回答列表分页中断，保留已读取的回答");
+        next = "";
         break;
       }
       const data = Array.isArray(result.data.data) ? result.data.data : [];
+      if (!data.length) {
+        next = "";
+        break;
+      }
       data.forEach((item) => {
         const answer = normalizeAnswer(item);
         if (answer && !ids.has(answer.id)) {
@@ -134,16 +141,19 @@ export class ZhihuExtractor implements ContentExtractor {
           answers.push(answer);
         }
       });
-      const candidate = isRecord(result.data.paging) && typeof result.data.paging.next === "string"
-        ? result.data.paging.next
-        : "";
-      const validated = validateZhihuAnswersNext(candidate, origin, questionId);
-      if (candidate && !validated) warnings.push("知乎回答列表包含不属于当前问题的分页地址，已停止分页");
-      next = validated;
       if (answers.length >= QUESTION_ANSWER_LIMIT) {
         next = "";
         break;
       }
+      const paging = isRecord(result.data.paging) ? result.data.paging : undefined;
+      if (paging?.is_end === true) {
+        next = "";
+        break;
+      }
+      const candidate = typeof paging?.next === "string" ? paging.next : "";
+      const validated = validateZhihuAnswersNext(candidate, origin, questionId);
+      if (candidate && !validated) warnings.push("知乎回答列表包含不属于当前问题的分页地址，已停止分页");
+      next = validated;
     }
     if (next) warnings.push("知乎回答列表达到分页安全上限，保留已读取回答");
     return answers;
@@ -164,6 +174,7 @@ export class ZhihuExtractor implements ContentExtractor {
     limits: CommentLimits,
     signal: AbortSignal,
     warnings: string[],
+    isQuestion = false,
   ): Promise<ZhihuComment[]> {
     const pageSize = Math.min(20, limits.top);
     let next = `${origin}/api/v4/answers/${encodeURIComponent(answerId)}/comments?order=normal&limit=${pageSize}&offset=0&status=open`;
@@ -172,21 +183,31 @@ export class ZhihuExtractor implements ContentExtractor {
     for (let page = 0; page < COMMENT_PAGE_LIMIT && next; page += 1) {
       const result = await this.fetchJson(tabId, next, signal);
       if (!result.ok || !isRecord(result.data)) {
-        warnings.push(`回答 ${answerId} 的评论读取在第 ${page + 1} 页中断`);
+        warnings.push(isQuestion ? "部分回答的评论读取中断，保留已读取内容" : `回答评论读取在第 ${page + 1} 页中断`);
+        next = "";
         break;
       }
       const data = Array.isArray(result.data.data) ? result.data.data : [];
+      if (!data.length) {
+        next = "";
+        break;
+      }
       data.flatMap((item) => flattenComment(item)).forEach((comment) => {
         if (!ids.has(comment.id)) {
           ids.add(comment.id);
           all.push(comment);
         }
       });
-      const candidate = isRecord(result.data.paging) && typeof result.data.paging.next === "string"
-        ? result.data.paging.next
-        : "";
+      const paging = isRecord(result.data.paging) ? result.data.paging : undefined;
+      if (paging?.is_end === true) {
+        next = "";
+        break;
+      }
+      const candidate = typeof paging?.next === "string" ? paging.next : "";
       const validated = validateZhihuCommentsNext(candidate, origin, answerId);
-      if (candidate && !validated) warnings.push(`回答 ${answerId} 的评论分页地址不匹配，已停止分页`);
+      if (candidate && !validated) {
+        warnings.push(isQuestion ? "部分回答的评论分页地址不匹配，已停止分页" : `回答 ${answerId} 的评论分页地址不匹配，已停止分页`);
+      }
       next = validated;
       const selected = selectComments(all, limits);
       if (selected.filter((comment) => !comment.isReply).length >= limits.top || renderComments(selected).length >= limits.maxChars) {
@@ -194,7 +215,9 @@ export class ZhihuExtractor implements ContentExtractor {
         break;
       }
     }
-    if (next) warnings.push(`回答 ${answerId} 的评论达到分页安全上限，保留已读取内容`);
+    if (next) {
+      warnings.push(isQuestion ? "部分回答的评论达到分页安全上限，保留已读取内容" : "回答评论达到分页安全上限，保留已读取内容");
+    }
 
     return fitCommentsToBudget(selectComments(all, limits), limits.maxChars);
   }
