@@ -62,7 +62,7 @@ export function OptionsApp() {
         setPrompt(loaded.promptOverride || DEFAULT_PROMPT);
         setConfig(loaded.openAICompatible || { apiRoot: "", model: "", chunkChars: DEFAULT_CHUNK_CHARS, maxSourceChars: DEFAULT_MAX_SOURCE_CHARS });
         setHasToken(Boolean(secret?.apiToken));
-        setHasKimiToken(Boolean(kimi?.refreshToken));
+        setHasKimiToken(Boolean(kimi?.refreshToken || kimi?.accessToken));
         setGeminiDiagnosticReports(diagnosticReports);
         setGeminiDiagnosticReport(diagnosticReports[0]);
       } catch (error) {

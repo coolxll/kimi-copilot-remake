@@ -91,7 +91,7 @@ export interface OpenAICompatibleSecret {
 
 export interface KimiTokens {
   accessToken?: string;
-  refreshToken: string;
+  refreshToken?: string;
 }
 
 export interface PageContext {

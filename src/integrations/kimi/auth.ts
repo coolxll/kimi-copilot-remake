@@ -23,17 +23,16 @@ export class KimiAuthService {
     try {
       while (Date.now() < deadline) {
         if (signal) throwIfAborted(signal);
-        let refreshToken: string | undefined;
+        let tokens: KimiTokens | undefined;
         try {
-          refreshToken = signal
-            ? await withAbort(this.readRefreshToken(tab.id), signal)
-            : await this.readRefreshToken(tab.id);
+          tokens = signal
+            ? await withAbort(this.readTokens(tab.id), signal)
+            : await this.readTokens(tab.id);
         } catch (error) {
           if (signal?.aborted) throw error;
         }
-        if (refreshToken) {
+        if (tokens && (tokens.refreshToken || tokens.accessToken)) {
           if (signal) throwIfAborted(signal);
-          const tokens = { refreshToken };
           await this.storage.saveKimiTokens(tokens);
           return tokens;
         }
@@ -46,13 +45,22 @@ export class KimiAuthService {
     }
   }
 
-  private async readRefreshToken(tabId: number): Promise<string | undefined> {
+  private async readTokens(tabId: number): Promise<KimiTokens | undefined> {
     const result = await browser.scripting.executeScript({
       target: { tabId },
-      func: () => window.localStorage.getItem("refresh_token"),
+      func: () => ({
+        accessToken: window.localStorage.getItem("access_token") || undefined,
+        refreshToken: window.localStorage.getItem("refresh_token") || undefined,
+      }),
     });
-    const token = result[0]?.result;
-    return typeof token === "string" && token ? token : undefined;
+    const item = result[0]?.result;
+    if (item && (item.refreshToken || item.accessToken)) {
+      return {
+        accessToken: typeof item.accessToken === "string" ? item.accessToken : undefined,
+        refreshToken: typeof item.refreshToken === "string" ? item.refreshToken : undefined,
+      };
+    }
+    return undefined;
   }
 }
 

@@ -96,11 +96,13 @@ describe("KimiClient token refresh", () => {
   });
 
   it("waits for file parsing via GetFileParseProgress RPC endpoint", async () => {
-    const fetchMock = vi.fn(async (input: string | URL | Request) => {
+    let requestPayload: any;
+    const fetchMock = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
       const url = String(input);
       if (url.includes("GetFileParseProgress")) {
+        requestPayload = JSON.parse(String(init?.body));
         return new Response(JSON.stringify({
-          progresses: [{ file_id: "file_456", status: "SUCCESS" }],
+          progresses: [{ file_id: "file_456", status: "PROCESS_STATUS_SUCCESS" }],
         }), { status: 200 });
       }
       return new Response("{}", { status: 200 });
@@ -111,6 +113,8 @@ describe("KimiClient token refresh", () => {
     const status = await client.waitForParse("file_456", new AbortController().signal);
 
     expect(status).toBe("parsed");
+    expect(requestPayload).toEqual({ file_ids: ["file_456"] });
+    expect(requestPayload.fileIds).toBeUndefined();
   });
 
   it("falls back to legacy SSE parse_process when RPC endpoint fails", async () => {
@@ -172,5 +176,22 @@ describe("KimiClient token refresh", () => {
     expect(result.fileId).toBe("test_upload_file_id");
     expect(result.status).toBe("parsed");
     expect(result.message).toContain("test_upload_file_id");
+  });
+
+  it("probes connectivity with accessToken alone without calling refresh endpoint", async () => {
+    const fetchMock = vi.fn(async (input: string | URL | Request) => {
+      const url = String(input);
+      expect(url).not.toContain("/api/auth/token/refresh");
+      if (url.includes("/api/chat")) {
+        return new Response(JSON.stringify({ id: "chat_access_only" }), { status: 200 });
+      }
+      return new Response("{}", { status: 200 });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const client = new KimiClient({ tokens: { accessToken: "access-only" }, onTokensRefreshed: async () => undefined });
+    await client.testConnection();
+
+    expect(fetchMock).toHaveBeenCalledOnce();
   });
 });

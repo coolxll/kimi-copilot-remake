@@ -12,7 +12,7 @@ const refreshFlights = new Map<string, Promise<KimiTokens>>();
 
 export class KimiClient {
   private accessToken?: string;
-  private refreshToken: string;
+  private refreshToken?: string;
   private refreshPromise?: Promise<void>;
   private readonly onTokensRefreshed: (tokens: KimiTokens) => Promise<void>;
 
@@ -24,11 +24,16 @@ export class KimiClient {
 
   /**
    * Refresh the current token without creating a chat or sending a prompt.
-   * The refresh endpoint is the only non-mutating authenticated probe exposed
-   * by the Kimi web client and also keeps a rotated refresh token current.
+   * If only an access token is available, verifies connectivity via a lightweight probe.
    */
   async testConnection(signal?: AbortSignal): Promise<void> {
-    await withAbort(this.refreshAccessToken(), signal);
+    if (this.refreshToken) {
+      await withAbort(this.refreshAccessToken(), signal);
+    } else if (this.accessToken) {
+      await this.createChat(signal);
+    } else {
+      throw new AppError("auth-required", "未提供 Kimi 登录凭证");
+    }
   }
 
   async testFileUpload(file?: File, signal?: AbortSignal): Promise<{ ok: true; fileId: string; status: string; message: string }> {
@@ -118,24 +123,29 @@ export class KimiClient {
             }>;
           }>("/apiv2-files/kimi.gateway.file.v1.FileService/GetFileParseProgress", {
             method: "POST",
-            body: JSON.stringify({ file_ids: [fileId], fileIds: [fileId] }),
+            body: JSON.stringify({ file_ids: [fileId] }),
             signal,
           });
 
           const progress = body.progresses?.find((p) => (p.file_id || p.fileId) === fileId) ?? body.progresses?.[0];
           if (progress?.status) {
             const status = progress.status.toUpperCase();
-            if (status === "SUCCESS" || status === "PARSED") {
+            if (status.includes("SUCCESS") || status.includes("PARSED") || status === "DONE") {
               return "parsed";
             }
-            if (status === "FAILED") {
+            if (status.includes("FAIL") || status.includes("ERROR")) {
               const detail = progress.error?.message || progress.error?.detail;
               throw new AppError("parse-failed", `Kimi 文件解析失败${detail ? `（${detail}）` : ""}`);
             }
           }
         } catch (error) {
           if (error instanceof AppError && error.code === "parse-failed") throw error;
-          rpcAvailable = false;
+          if (error instanceof AppError && error.message.includes("404")) {
+            rpcAvailable = false;
+          } else {
+            const isTransient = error instanceof AppError && error.retryable;
+            if (!isTransient) throw error;
+          }
         }
       }
 
@@ -148,33 +158,47 @@ export class KimiClient {
     throw new AppError("parse-failed", "Kimi 文件解析超时");
   }
 
-  private async waitForParseSse(fileId: string, signal: AbortSignal): Promise<string> {
-    const response = await this.requestStream("/api/file/parse_process", {
-      method: "POST",
-      body: JSON.stringify({ ids: [fileId] }),
-      signal,
-    });
-    if (!response.body) throw new AppError("parse-failed", "Kimi 没有返回文件解析流");
-    for await (const event of readSseStream(response.body, signal)) {
-      if (!event.data || !event.data.trim()) continue;
-      let payload: any;
-      try {
-        payload = JSON.parse(event.data);
-      } catch {
-        continue;
-      }
-      const status = (payload?.status && payload.status !== "parsing")
-        ? payload.status
-        : (payload?.[fileId]?.status ?? payload?.data?.status ?? payload?.file_status);
-      if (status && status !== "parsing") {
-        if (status !== "parsed") {
+  private async waitForParseSse(fileId: string, signal: AbortSignal, timeoutMs = 30_000): Promise<string> {
+    const sseController = new AbortController();
+    const timeoutId = setTimeout(() => {
+      sseController.abort(new AppError("parse-failed", "Kimi 文件解析流等待超时"));
+    }, timeoutMs);
+
+    const onAbort = () => sseController.abort(signal.reason ?? new DOMException("Aborted", "AbortError"));
+    signal.addEventListener("abort", onAbort, { once: true });
+
+    try {
+      const response = await this.requestStream("/api/file/parse_process", {
+        method: "POST",
+        body: JSON.stringify({ ids: [fileId] }),
+        signal: sseController.signal,
+      });
+      if (!response.body) throw new AppError("parse-failed", "Kimi 没有返回文件解析流");
+      for await (const event of readSseStream(response.body, sseController.signal)) {
+        if (!event.data || !event.data.trim()) continue;
+        let payload: any;
+        try {
+          payload = JSON.parse(event.data);
+        } catch {
+          continue;
+        }
+        const status = (payload?.status && payload.status !== "parsing")
+          ? payload.status
+          : (payload?.[fileId]?.status ?? payload?.data?.status ?? payload?.file_status);
+        if (status && status !== "parsing") {
+          const upper = String(status).toUpperCase();
+          if (upper.includes("SUCCESS") || upper.includes("PARSED") || upper === "DONE") {
+            return "parsed";
+          }
           const detail = payload?.detail || payload?.message || payload?.error || payload?.reason || payload?.[fileId]?.error;
           throw new AppError("parse-failed", `Kimi 文件解析状态：${status}${detail ? `（${detail}）` : ""}`);
         }
-        return status;
       }
+      throw new AppError("parse-failed", "Kimi 文件解析流提前结束");
+    } finally {
+      clearTimeout(timeoutId);
+      signal.removeEventListener("abort", onAbort);
     }
-    throw new AppError("parse-failed", "Kimi 文件解析流提前结束");
   }
 
   async *sendMessage(
@@ -240,17 +264,29 @@ export class KimiClient {
     });
     const response = await execute();
     if (response.status !== 401) return response;
+    if (!this.refreshToken) {
+      throw new AppError("auth-required", "Kimi 登录凭证已失效，请重新登录");
+    }
     await withAbort(this.refreshAccessToken(), signal ?? undefined);
     return execute();
   }
 
   private async ensureAccessToken(): Promise<void> {
-    if (!this.accessToken) await this.refreshAccessToken();
+    if (!this.accessToken) {
+      if (this.refreshToken) {
+        await this.refreshAccessToken();
+      } else {
+        throw new AppError("auth-required", "未提供 Kimi 登录凭据，请先登录");
+      }
+    }
   }
 
   private async refreshAccessToken(): Promise<void> {
     if (this.refreshPromise) return this.refreshPromise;
     const refreshToken = this.refreshToken;
+    if (!refreshToken) {
+      throw new AppError("auth-required", "缺少 Kimi refresh_token，请重新登录");
+    }
     let flight = refreshFlights.get(refreshToken);
     if (!flight) {
       flight = (async () => {
@@ -283,11 +319,18 @@ export class KimiClient {
     return this.refreshPromise;
   }
 
-  private errorFromResponse(status: number, _body: string): AppError {
-    if (status === 401 || status === 403) return new AppError("auth-required", "Kimi 登录态已失效");
+  private errorFromResponse(status: number, body: string): AppError {
+    if (status === 401 || status === 403) return new AppError("auth-required", "Kimi 登录态已失效，请重新登录");
     if (status === 429) return new AppError("rate-limit", "Kimi 请求过于频繁，请稍后重试", { retryable: true });
     if (status >= 500) return new AppError("api-unavailable", `Kimi 服务暂不可用（HTTP ${status}）`, { retryable: true });
-    return new AppError("api-contract", `Kimi 请求失败（HTTP ${status}）`);
+    let detail = "";
+    try {
+      const parsed = JSON.parse(body);
+      detail = parsed.message || parsed.detail || parsed.error?.message || "";
+    } catch {
+      // not JSON
+    }
+    return new AppError("api-contract", `Kimi 请求失败（HTTP ${status}${detail ? `：${detail}` : ""}）`);
   }
 }
 

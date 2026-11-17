@@ -74,7 +74,7 @@ export function createSettingsRepository(): SettingsRepository {
     async getKimiTokens() {
       const stored = await browser.storage.local.get(KIMI_TOKENS_KEY);
       const tokens = stored[KIMI_TOKENS_KEY];
-      return tokens && typeof tokens === "object" && typeof (tokens as KimiTokens).refreshToken === "string"
+      return tokens && typeof tokens === "object" && (typeof (tokens as KimiTokens).refreshToken === "string" || typeof (tokens as KimiTokens).accessToken === "string")
         ? (tokens as KimiTokens)
         : null;
     },
