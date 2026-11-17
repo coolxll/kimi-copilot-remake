@@ -31,6 +31,23 @@ export class KimiClient {
     await withAbort(this.refreshAccessToken(), signal);
   }
 
+  async testFileUpload(file?: File, signal?: AbortSignal): Promise<{ ok: true; fileId: string; status: string; message: string }> {
+    const testFile = file || new File(
+      ["Kimi Copilot 文件上传与解析测试。\n这是一份用于验证 Kimi 网页端 apiv2-files 文件上传协议与解析进度的示例文档。"],
+      "kimi-upload-test.txt",
+      { type: "text/plain" },
+    );
+    const uploaded = await this.uploadFile(testFile, signal);
+    const probeSignal = signal ?? new AbortController().signal;
+    const status = await this.waitForParse(uploaded.id, probeSignal);
+    return {
+      ok: true,
+      fileId: uploaded.id,
+      status,
+      message: `文件上传成功（ID: ${uploaded.id}），解析状态：${status}`,
+    };
+  }
+
   async createChat(signal?: AbortSignal): Promise<{ id: string }> {
     const body = await this.requestJson<{ id?: string }>("/api/chat", {
       method: "POST",

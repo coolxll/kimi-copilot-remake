@@ -30,7 +30,7 @@ describe("KimiProvider", () => {
     await expect(provider.validateReady()).rejects.toThrowError(AppError);
   });
 
-  it("summarizes directly with prompt text and skips file upload for normal length pages", async () => {
+  it("summarizes directly with prompt text and skips file upload when uploadFile is absent", async () => {
     const storage = createMockStorage();
     const provider = new KimiProvider(storage);
 
@@ -50,7 +50,7 @@ describe("KimiProvider", () => {
       if (url.includes("/api/chat")) {
         return new Response(JSON.stringify({ id: "chat_123" }), { status: 200 });
       }
-      if (url.includes("/api/pre-sign-url")) {
+      if (url.includes("/api/pre-sign-url") || url.includes("/apiv2-files/file/upload")) {
         uploadFileSpy();
         return new Response("{}", { status: 200 });
       }
@@ -65,7 +65,7 @@ describe("KimiProvider", () => {
         title: "知乎问题讨论",
         sourceUrl: "https://www.zhihu.com/question/123",
         sourceText: "这是知乎回答正文",
-        uploadFile: new File(["这是知乎回答正文"], "知乎问题.md", { type: "text/markdown" }),
+        uploadFile: undefined,
         warnings: [],
       },
       prompt: "请总结核心观点",
@@ -77,6 +77,89 @@ describe("KimiProvider", () => {
     expect(events.some((e) => e.type === "phase" && e.phase === "uploading")).toBe(false);
     expect(events.some((e) => e.type === "warning" && e.message.includes("文件上传或解析失败"))).toBe(false);
     expect(events.find((e) => e.type === "delta")).toEqual({ type: "delta", text: "总结回答" });
+  });
+
+  it("uploads file by default when uploadFile is present", async () => {
+    const storage = createMockStorage();
+    const provider = new KimiProvider(storage);
+
+    let uploadCalled = false;
+    let parseProgressCalled = false;
+
+    const fetchMock = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+      const url = String(input);
+      if (url.includes("/api/auth/token/refresh")) {
+        return new Response(JSON.stringify({ access_token: "acc", refresh_token: "tok" }), { status: 200 });
+      }
+      if (url.includes("/apiv2-files/file/upload")) {
+        uploadCalled = true;
+        return new Response(JSON.stringify({ file: { id: "file_doc_1" } }), { status: 200 });
+      }
+      if (url.includes("GetFileParseProgress")) {
+        parseProgressCalled = true;
+        return new Response(JSON.stringify({
+          progresses: [{ file_id: "file_doc_1", status: "SUCCESS" }],
+        }), { status: 200 });
+      }
+      if (url.includes("/api/chat/") && url.includes("/completion/stream")) {
+        const body = JSON.parse(String(init?.body));
+        expect(body.refs).toEqual(["file_doc_1"]);
+        const sse = "data: {\"event\": \"cmpl\", \"text\": \"总结网页\"}\n\ndata: {\"event\": \"all_done\"}\n\n";
+        return new Response(sse, { status: 200, headers: { "Content-Type": "text/event-stream" } });
+      }
+      if (url.includes("/api/chat")) {
+        return new Response(JSON.stringify({ id: "chat_456" }), { status: 200 });
+      }
+      return new Response("{}", { status: 200 });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const events: SummaryEvent[] = [];
+    for await (const event of provider.summarize({
+      document: {
+        kind: "webpage",
+        title: "知乎问题讨论",
+        sourceUrl: "https://www.zhihu.com/question/123",
+        sourceText: "这是知乎回答正文",
+        uploadFile: new File(["这是知乎回答正文"], "zhihu.clean.html", { type: "text/html" }),
+        warnings: [],
+      },
+      prompt: "请总结核心观点",
+    }, new AbortController().signal)) {
+      events.push(event);
+    }
+
+    expect(uploadCalled).toBe(true);
+    expect(parseProgressCalled).toBe(true);
+    expect(events.some((e) => e.type === "phase" && e.phase === "uploading")).toBe(true);
+    expect(events.find((e) => e.type === "delta")).toEqual({ type: "delta", text: "总结网页" });
+  });
+
+  it("tests file upload directly using testFileUpload", async () => {
+    const storage = createMockStorage();
+    const provider = new KimiProvider(storage);
+
+    const fetchMock = vi.fn(async (input: string | URL | Request) => {
+      const url = String(input);
+      if (url.includes("/api/auth/token/refresh")) {
+        return new Response(JSON.stringify({ access_token: "acc", refresh_token: "tok" }), { status: 200 });
+      }
+      if (url.includes("/apiv2-files/file/upload")) {
+        return new Response(JSON.stringify({ file: { id: "test_upload_id" } }), { status: 200 });
+      }
+      if (url.includes("GetFileParseProgress")) {
+        return new Response(JSON.stringify({
+          progresses: [{ file_id: "test_upload_id", status: "SUCCESS" }],
+        }), { status: 200 });
+      }
+      return new Response("{}", { status: 200 });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const res = await provider.testFileUpload();
+    expect(res.ok).toBe(true);
+    expect(res.fileId).toBe("test_upload_id");
+    expect(res.status).toBe("parsed");
   });
 
   it("attempts file upload when page text is empty (e.g. PDF)", async () => {

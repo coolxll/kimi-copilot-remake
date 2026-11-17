@@ -31,6 +31,7 @@ export interface AppServices {
       signal?: AbortSignal;
     },
   ): Promise<ProviderConnectionResult>;
+  testKimiUpload(file?: File, signal?: AbortSignal): Promise<{ ok: boolean; fileId: string; status: string; message: string }>;
 }
 
 export function createAppServices(): AppServices {
@@ -66,6 +67,9 @@ export function createAppServices(): AppServices {
       }
       if (secret === undefined) secret = await storage.getOpenAISecret();
       return new OpenAICompatibleProvider({ config, secret: secret ?? null }).testConnection();
+    },
+    async testKimiUpload(file, signal) {
+      return new KimiProvider(storage).testFileUpload(file, signal);
     },
   };
 }

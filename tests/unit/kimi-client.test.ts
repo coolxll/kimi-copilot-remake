@@ -146,4 +146,31 @@ describe("KimiClient token refresh", () => {
 
     expect(status).toBe("parsed");
   });
+
+  it("tests end-to-end file upload and parse waiting with testFileUpload", async () => {
+    const fetchMock = vi.fn(async (input: string | URL | Request) => {
+      const url = String(input);
+      if (url.includes("/api/auth/token/refresh")) {
+        return new Response(JSON.stringify({ access_token: "access", refresh_token: "refresh" }), { status: 200 });
+      }
+      if (url.includes("/apiv2-files/file/upload")) {
+        return new Response(JSON.stringify({ file: { id: "test_upload_file_id" } }), { status: 200 });
+      }
+      if (url.includes("GetFileParseProgress")) {
+        return new Response(JSON.stringify({
+          progresses: [{ file_id: "test_upload_file_id", status: "SUCCESS" }],
+        }), { status: 200 });
+      }
+      return new Response("{}", { status: 200 });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const client = new KimiClient({ tokens: { accessToken: "access", refreshToken: "refresh" }, onTokensRefreshed: async () => undefined });
+    const result = await client.testFileUpload();
+
+    expect(result.ok).toBe(true);
+    expect(result.fileId).toBe("test_upload_file_id");
+    expect(result.status).toBe("parsed");
+    expect(result.message).toContain("test_upload_file_id");
+  });
 });

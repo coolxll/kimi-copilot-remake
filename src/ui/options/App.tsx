@@ -24,12 +24,14 @@ export function OptionsApp() {
   const [webStatuses, setWebStatuses] = useState<Record<WebSessionProviderId, WebSessionLoginStatus>>(createInitialWebSessionStatuses);
   const [checkingWebStatus, setCheckingWebStatus] = useState<WebSessionProviderId | "all" | null>(null);
   const [connectionStatuses, setConnectionStatuses] = useState<Record<ProviderId, ConnectivityStatus>>(createInitialConnectivityStatuses);
+  const [kimiUploadStatus, setKimiUploadStatus] = useState<ConnectivityStatus>({ state: "idle" });
   const [geminiDiagnosticReports, setGeminiDiagnosticReports] = useState<GeminiDiagnosticReport[]>([]);
   const [geminiDiagnosticReport, setGeminiDiagnosticReport] = useState<GeminiDiagnosticReport>();
   const [geminiDiagnosticEvents, setGeminiDiagnosticEvents] = useState<GeminiDiagnosticEvent[]>([]);
   const [geminiDiagnosticMode, setGeminiDiagnosticMode] = useState<GeminiDiagnosticMode>();
   const loginControllerRef = useRef<AbortController | undefined>(undefined);
   const connectionControllersRef = useRef(new Map<ProviderId, AbortController>());
+  const kimiUploadControllerRef = useRef<AbortController | undefined>(undefined);
   const geminiDiagnosticControllerRef = useRef<AbortController | undefined>(undefined);
   const [notice, setNotice] = useState<{ kind: "success" | "error"; text: string }>();
   const [saving, setSaving] = useState(false);
@@ -71,6 +73,7 @@ export function OptionsApp() {
     return () => {
       loginControllerRef.current?.abort("options closed");
       for (const controller of connectionControllersRef.current.values()) controller.abort("options closed");
+      kimiUploadControllerRef.current?.abort("options closed");
       geminiDiagnosticControllerRef.current?.abort("options closed");
     };
     // Services are stable for this options page.
@@ -160,6 +163,23 @@ export function OptionsApp() {
     } finally {
       if (!controller.signal.aborted && isWebSessionProvider(providerId)) void refreshWebSessionStatuses(providerId);
       if (connectionControllersRef.current.get(providerId) === controller) connectionControllersRef.current.delete(providerId);
+    }
+  };
+
+  const runKimiUploadTest = async () => {
+    kimiUploadControllerRef.current?.abort("new upload test");
+    const controller = new AbortController();
+    kimiUploadControllerRef.current = controller;
+    setKimiUploadStatus({ state: "testing" });
+    try {
+      const res = await services.testKimiUpload(undefined, controller.signal);
+      setKimiUploadStatus({ state: "success", message: res.message });
+    } catch (error) {
+      if (controller.signal.aborted) return;
+      const appError = toAppError(error);
+      setKimiUploadStatus({ state: "error", message: appError.message, code: appError.code });
+    } finally {
+      if (kimiUploadControllerRef.current === controller) kimiUploadControllerRef.current = undefined;
     }
   };
 
@@ -277,7 +297,15 @@ export function OptionsApp() {
     </section>
     <section className="card">
       <h2 className="provider-heading"><ProviderIcon providerId="kimi-web" /> Kimi Web</h2><p className="muted">复用当前浏览器中的 Kimi 登录态，文件会通过 Kimi 文件接口处理。</p>
-      <div className="actions"><span className={hasKimiToken ? "success" : "warning"}>{hasKimiToken ? "已配置登录态" : "未登录"}</span><button className="button" onClick={() => void loginKimi()}>{hasKimiToken ? "重新登录" : "登录 Kimi"}</button><button className="button" disabled={!hasKimiToken || isConnectionTesting(connectionStatuses["kimi-web"])} onClick={() => void testProviderConnection("kimi-web")}>{isConnectionTesting(connectionStatuses["kimi-web"]) ? "测试中…" : "测试连通性"}</button>{renderConnectivityStatus(connectionStatuses["kimi-web"])}{hasKimiToken && <button className="button danger" onClick={() => void clearKimi()}>清除登录态</button>}</div>
+      <div className="actions">
+        <span className={hasKimiToken ? "success" : "warning"}>{hasKimiToken ? "已配置登录态" : "未登录"}</span>
+        <button className="button" onClick={() => void loginKimi()}>{hasKimiToken ? "重新登录" : "登录 Kimi"}</button>
+        <button className="button" disabled={!hasKimiToken || isConnectionTesting(connectionStatuses["kimi-web"])} onClick={() => void testProviderConnection("kimi-web")}>{isConnectionTesting(connectionStatuses["kimi-web"]) ? "测试中…" : "测试连通性"}</button>
+        <button className="button" disabled={!hasKimiToken || kimiUploadStatus.state === "testing"} onClick={() => void runKimiUploadTest()}>{kimiUploadStatus.state === "testing" ? "上传测试中…" : "测试文件上传"}</button>
+        {renderConnectivityStatus(connectionStatuses["kimi-web"])}
+        {kimiUploadStatus.state !== "idle" && renderConnectivityStatus(kimiUploadStatus)}
+        {hasKimiToken && <button className="button danger" onClick={() => void clearKimi()}>清除登录态</button>}
+      </div>
     </section>
     <section className="card">
       <h2>网页会话后端</h2>

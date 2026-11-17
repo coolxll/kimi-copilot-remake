@@ -26,6 +26,16 @@ export class KimiProvider implements SummaryProvider {
     return { ok: true, message: "Kimi Web Token 刷新成功，连通性正常" };
   }
 
+  async testFileUpload(file?: File, signal?: AbortSignal): Promise<{ ok: true; fileId: string; status: string; message: string }> {
+    const tokens = await this.storage.getKimiTokens();
+    if (!tokens) throw new AppError("auth-required", "请先登录 Kimi");
+    const client = new KimiClient({
+      tokens,
+      onTokensRefreshed: (next) => this.storage.saveKimiTokens(next),
+    });
+    return client.testFileUpload(file, signal);
+  }
+
   async *summarize(request: SummaryRequest, signal: AbortSignal): AsyncIterable<SummaryEvent> {
     const tokens = await this.storage.getKimiTokens();
     if (!tokens) throw new AppError("auth-required", "请先登录 Kimi");
@@ -75,6 +85,6 @@ export class KimiProvider implements SummaryProvider {
   }
 }
 
-function shouldUploadKimiFile(file: File | undefined, sourceText: string): file is File {
-  return Boolean(file && (!sourceText.trim() || sourceText.length > MAX_KIMI_SOURCE_CHARS));
+function shouldUploadKimiFile(file: File | undefined, _sourceText?: string): file is File {
+  return Boolean(file);
 }

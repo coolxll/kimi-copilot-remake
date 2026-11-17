@@ -5,6 +5,7 @@ import type { DocumentKind, ExtractedDocument, PageContext } from "../../domain/
 import type { ExtractorDescriptor } from "../../extractors/extractor";
 import { createExtractorRegistry, selectExtractor } from "../../extractors/registry";
 import { ensurePageHostPermission } from "../../platform/chrome/permissions";
+import { createAppServices } from "../../application/services";
 import "../styles.css";
 
 interface TestTab {
@@ -40,6 +41,7 @@ const DOCUMENT_KIND_LABELS: Record<DocumentKind, string> = {
 };
 
 export function ExtractorTestApp() {
+  const services = createAppServices();
   const [tabs, setTabs] = useState<TestTab[]>([]);
   const [selectedTabId, setSelectedTabId] = useState<number>();
   const [urlInput, setUrlInput] = useState("");
@@ -47,9 +49,18 @@ export function ExtractorTestApp() {
   const [running, setRunning] = useState(false);
   const [notice, setNotice] = useState<{ kind: "error" | "success"; text: string }>();
   const [result, setResult] = useState<ExtractorTestResult>();
+  const [extractedDoc, setExtractedDoc] = useState<ExtractedDocument>();
+  const [uploadStatus, setUploadStatus] = useState<{
+    state: "idle" | "uploading" | "success" | "error";
+    message?: string;
+  }>({ state: "idle" });
   const controllerRef = useRef<AbortController | undefined>(undefined);
+  const uploadControllerRef = useRef<AbortController | undefined>(undefined);
 
-  useEffect(() => () => controllerRef.current?.abort("test page closed"), []);
+  useEffect(() => () => {
+    controllerRef.current?.abort("test page closed");
+    uploadControllerRef.current?.abort("test page closed");
+  }, []);
 
   const scanTabs = async () => {
     setLoadingTabs(true);
@@ -90,6 +101,8 @@ export function ExtractorTestApp() {
     setRunning(true);
     setNotice(undefined);
     setResult(undefined);
+    setExtractedDoc(undefined);
+    setUploadStatus({ state: "idle" });
     controllerRef.current?.abort("new extractor test");
     const controller = new AbortController();
     controllerRef.current = controller;
@@ -117,6 +130,7 @@ export function ExtractorTestApp() {
       const context: PageContext = { tabId: tab.id, url: tab.url, title: tab.title };
       const extractor = await selectExtractor(createExtractorRegistry(), context, controller.signal);
       const document = await extractor.extract(context, controller.signal);
+      setExtractedDoc(document);
       setResult(toTestResult(document, extractor.descriptor));
       setNotice(document.warnings.length
         ? { kind: "error", text: "提取完成，但存在 warning；请查看下方详情。" }
@@ -130,6 +144,29 @@ export function ExtractorTestApp() {
 
   const copyOutput = () => {
     if (result?.output) void navigator.clipboard.writeText(result.output);
+  };
+
+  const testUploadToKimi = async () => {
+    if (!extractedDoc) return;
+    uploadControllerRef.current?.abort("new upload test");
+    const controller = new AbortController();
+    uploadControllerRef.current = controller;
+    setUploadStatus({ state: "uploading" });
+    try {
+      const uploadFile = extractedDoc.uploadFile || new File(
+        [extractedDoc.sourceText],
+        `${extractedDoc.title.replace(/[^\w.-]+/g, "_") || "extracted"}.txt`,
+        { type: "text/plain" },
+      );
+      const res = await services.testKimiUpload(uploadFile, controller.signal);
+      setUploadStatus({ state: "success", message: res.message });
+    } catch (error) {
+      if (controller.signal.aborted) return;
+      const appError = toAppError(error);
+      setUploadStatus({ state: "error", message: appError.message });
+    } finally {
+      if (uploadControllerRef.current === controller) uploadControllerRef.current = undefined;
+    }
   };
 
   const selectedTab = tabs.find((tab) => tab.id === selectedTabId);
@@ -160,11 +197,24 @@ export function ExtractorTestApp() {
     {notice && <div className={notice.kind === "success" ? "success" : "error"}>{notice.text}</div>}
     {result && <section className="card">
       <h2>提取结果</h2>
-      <p className="muted">站点：{result.extractor.label} · 输出：{DOCUMENT_KIND_LABELS[result.kind]} · {result.title} · {result.output.length.toLocaleString()} 字符</p>
+      <p className="muted">
+        站点：{result.extractor.label} · 输出：{DOCUMENT_KIND_LABELS[result.kind]} · {result.title} · {result.output.length.toLocaleString()} 字符
+        {extractedDoc?.uploadFile ? ` · 预生成文件：${extractedDoc.uploadFile.name} (${extractedDoc.uploadFile.size.toLocaleString()} 字节)` : " · 纯文本提取"}
+      </p>
       <span className="tab-url">{result.url}</span>
       {result.warnings.map((warning) => <div className="warning" key={warning}>{warning}</div>)}
       {result.output
-        ? <><pre className="subtitle-output">{result.output}</pre><div className="actions"><button className="button" onClick={copyOutput}>复制提取结果</button></div></>
+        ? <><pre className="subtitle-output">{result.output}</pre><div className="actions">
+            <button className="button" onClick={copyOutput}>复制提取结果</button>
+            <button className="button" disabled={uploadStatus.state === "uploading"} onClick={() => void testUploadToKimi()}>
+              {uploadStatus.state === "uploading" ? "上传与解析中…" : `测试上传至 Kimi${extractedDoc?.uploadFile ? ` (${extractedDoc.uploadFile.name})` : ""}`}
+            </button>
+            {uploadStatus.state !== "idle" && (
+              <span className={`connectivity-status ${uploadStatus.state === "success" ? "success" : uploadStatus.state === "error" ? "error" : "muted"}`}>
+                {uploadStatus.state === "uploading" ? "上传与等待解析中…" : uploadStatus.message}
+              </span>
+            )}
+          </div></>
         : <div className="warning">没有提取到正文或字幕；请查看上面的 warning。</div>}
     </section>}
   </div></main>;
